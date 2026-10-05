@@ -1,0 +1,289 @@
+//
+//  HTTPConnection.swift
+//  HTTPConnectionKit
+//
+//  Created by NeedleTails on 10/5/26.
+//
+
+import Foundation
+import HTTPTypes
+import NIOCore
+import NIOHTTP1
+
+/// A long-lived HTTP client.
+///
+/// `version` is the highest protocol this client may use. One TLS handshake offers the protocols
+/// under that cap, and the server selects HTTP/2 or HTTP/1.1. When the cap is HTTP/3, that QUIC
+/// handshake runs beside the TCP connection and is used only if it succeeds.
+///
+/// Create one instance per TLS policy and call `shutdown()` when it is finished. The event-loop
+/// groups are process-wide and are not shut down with the client.
+public actor HTTPConnection: Request {
+    /// Highest HTTP version this client may use.
+    let version: HTTPVersion
+    /// Channel and TLS settings applied to every connection this client opens.
+    let configuration: Configuration
+    var connections: [ObjectIdentifier: LiveConnection] = [:]
+    /// Origins whose QUIC handshake failed while TCP succeeded. Later requests on this client use TCP.
+    var quicDeniedOrigins: Set<Origin> = []
+
+    /// Creates a client whose preferred version is the highest protocol it may negotiate.
+    public init(preferred version: HTTPVersion = .http3, configuration: Configuration = Configuration()) {
+        self.version = version
+        self.configuration = configuration
+    }
+
+    /// Closes every connection this client still holds.
+    ///
+    /// In-flight request streams fail and close with their connection. Call this when the client is finished.
+    public func shutdown() async {
+        let open = connections.values.map(\.channel)
+        connections.removeAll()
+        for channel in open {
+            await Self.closeConnection(channel)
+        }
+    }
+
+    /// Sends one request and returns the collected response.
+    ///
+    /// GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS, TRACE, QUERY, and any other method token share
+    /// one exchange. CONNECT is rejected because it opens a tunnel.
+    public func request(
+        method: HTTPRequest.Method,
+        url: URL,
+        headers: HTTPFields,
+        body: Data?
+    ) async throws -> Response {
+        let components = try requestComponents(from: url)
+
+        switch method {
+        case .connect:
+            throw HTTPConnectionError.unimplemented
+        case .get:
+            return try await performGet(components, headers: headers, body: body)
+        case .head:
+            return try await performHead(components, headers: headers, body: body)
+        case .post:
+            return try await performPost(components, headers: headers, body: body)
+        case .put:
+            return try await performPut(components, headers: headers, body: body)
+        case .patch:
+            return try await performPatch(components, headers: headers, body: body)
+        case .delete:
+            return try await performDelete(components, headers: headers, body: body)
+        case .options:
+            return try await performOptions(components, headers: headers, body: body)
+        case .trace:
+            return try await performTrace(components, headers: headers, body: body)
+        case .query:
+            return try await performQuery(components, headers: headers, body: body)
+        default:
+            return try await performExtension(method, components, headers: headers, body: body)
+        }
+    }
+
+    /// Accepts `http` and `https` URLs and builds the path, query, and authority the wire request uses.
+    private func requestComponents(from url: URL) throws -> RequestComponents {
+        guard
+            let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+            let scheme = parts.scheme?.lowercased(),
+            let host = parts.host,
+            !host.isEmpty
+        else {
+            throw HTTPConnectionError.invalidRequest
+        }
+
+        let enableTLS: Bool
+        let defaultPort: Int
+        switch scheme {
+        case "https":
+            enableTLS = true
+            defaultPort = 443
+        case "http":
+            enableTLS = false
+            defaultPort = 80
+        default:
+            throw HTTPConnectionError.invalidRequest
+        }
+
+        let port = parts.port ?? defaultPort
+        guard (1...65535).contains(port) else {
+            throw HTTPConnectionError.invalidRequest
+        }
+
+        var path = parts.percentEncodedPath
+        if path.isEmpty {
+            path = "/"
+        }
+        if let query = parts.percentEncodedQuery {
+            path += "?\(query)"
+        }
+
+        let authorityHost = host.contains(":") ? "[\(host)]" : host
+        let authority = port == defaultPort ? authorityHost : "\(authorityHost):\(port)"
+        return RequestComponents(
+            scheme: scheme,
+            host: host,
+            port: port,
+            path: path,
+            authority: authority,
+            enableTLS: enableTLS
+        )
+    }
+
+    private func performGet(
+        _ components: RequestComponents,
+        headers: HTTPFields,
+        body: Data?
+    ) async throws -> Response {
+        try await performExchange(.get, components, headers: headers, body: body)
+    }
+
+    private func performHead(
+        _ components: RequestComponents,
+        headers: HTTPFields,
+        body: Data?
+    ) async throws -> Response {
+        try await performExchange(.head, components, headers: headers, body: body)
+    }
+
+    private func performPost(
+        _ components: RequestComponents,
+        headers: HTTPFields,
+        body: Data?
+    ) async throws -> Response {
+        try await performExchange(.post, components, headers: headers, body: body)
+    }
+
+    private func performPatch(
+        _ components: RequestComponents,
+        headers: HTTPFields,
+        body: Data?
+    ) async throws -> Response {
+        try await performExchange(.patch, components, headers: headers, body: body)
+    }
+
+    private func performPut(
+        _ components: RequestComponents,
+        headers: HTTPFields,
+        body: Data?
+    ) async throws -> Response {
+        try await performExchange(.put, components, headers: headers, body: body)
+    }
+
+    private func performDelete(
+        _ components: RequestComponents,
+        headers: HTTPFields,
+        body: Data?
+    ) async throws -> Response {
+        try await performExchange(.delete, components, headers: headers, body: body)
+    }
+
+    private func performOptions(
+        _ components: RequestComponents,
+        headers: HTTPFields,
+        body: Data?
+    ) async throws -> Response {
+        try await performExchange(.options, components, headers: headers, body: body)
+    }
+
+    private func performTrace(
+        _ components: RequestComponents,
+        headers: HTTPFields,
+        body: Data?
+    ) async throws -> Response {
+        try await performExchange(.trace, components, headers: headers, body: body)
+    }
+
+    private func performQuery(
+        _ components: RequestComponents,
+        headers: HTTPFields,
+        body: Data?
+    ) async throws -> Response {
+        try await performExchange(.query, components, headers: headers, body: body)
+    }
+
+    /// Extension methods such as WebDAV verbs use the same request shape as the standard methods.
+    private func performExtension(
+        _ method: HTTPRequest.Method,
+        _ components: RequestComponents,
+        headers: HTTPFields,
+        body: Data?
+    ) async throws -> Response {
+        try await performExchange(method, components, headers: headers, body: body)
+    }
+
+    /// Opens the request channel for the negotiated protocol, then reads the response.
+    ///
+    /// HTTP/2 and HTTP/3 keep the connection and wrap each request stream. HTTP/1's request channel
+    /// is the connection, and closing the request closes that connection. Cancellation closes whichever
+    /// channel the request currently owns.
+    private func performExchange(
+        _ method: HTTPRequest.Method,
+        _ components: RequestComponents,
+        headers: HTTPFields,
+        body: Data?
+    ) async throws -> Response {
+        let cancelTarget = CancelTarget()
+        return try await withTaskCancellationHandler {
+            let connection = try await self.connection(for: components, cancelTarget: cancelTarget)
+            if connection.created {
+                cancelTarget.set(connection.channel, closesParent: true)
+            }
+            if connection.version == .http2 {
+                let request = try await Self.openHTTP2Request(
+                    on: connection.channel,
+                    enableTLS: components.enableTLS,
+                    cancelTarget: cancelTarget
+                )
+                return try await request.executeThenClose { inbound, outbound in
+                    try await Self.exchangeHTTP1(
+                        method: method,
+                        components: components,
+                        headers: headers,
+                        body: body,
+                        requestVersion: .http1_1,
+                        inbound: inbound,
+                        outbound: outbound
+                    )
+                }
+            } else if connection.version == .http3 {
+                guard #available(anyAppleOS 26, *) else {
+                    throw HTTPConnectionError.unimplemented
+                }
+                let request = try await Self.openHTTP3Request(
+                    on: connection.channel,
+                    cancelTarget: cancelTarget
+                )
+                return try await request.executeThenClose { inbound, outbound in
+                    try await Self.exchangeHTTP3(
+                        method: method,
+                        components: components,
+                        headers: headers,
+                        body: body,
+                        inbound: inbound,
+                        outbound: outbound
+                    )
+                }
+            } else {
+                let request = try await Self.openHTTP1Request(
+                    on: connection.channel,
+                    cancelTarget: cancelTarget
+                )
+                return try await request.executeThenClose { inbound, outbound in
+                    try await Self.exchangeHTTP1(
+                        method: method,
+                        components: components,
+                        headers: headers,
+                        body: body,
+                        requestVersion: connection.version,
+                        inbound: inbound,
+                        outbound: outbound
+                    )
+                }
+            }
+        } onCancel: {
+            cancelTarget.close()
+        }
+    }
+}
