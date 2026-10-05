@@ -16,12 +16,14 @@ import NIOSSL
 final class HTTP1FixtureServer {
     let port: Int
     let accepts: AcceptCounter
-    let hold: HoldGate
+    let gates: FixtureGates
     private let channel: any Channel
+
+    var hold: HoldGate { gates.hold }
 
     static func bind() async throws -> HTTP1FixtureServer {
         let accepts = AcceptCounter()
-        let hold = HoldGate()
+        let gates = FixtureGates()
         let channel = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(.tcpOption(.tcp_nodelay), value: 1)
@@ -30,22 +32,22 @@ final class HTTP1FixtureServer {
                 channel.eventLoop.makeCompletedFuture {
                     accepts.increment()
                     try channel.pipeline.syncOperations.configureHTTPServerPipeline()
-                    try channel.pipeline.syncOperations.addHandler(FixtureHTTPHandler(hold: hold))
+                    try channel.pipeline.syncOperations.addHandler(FixtureHTTPHandler(gates: gates))
                 }
             }
             .bind(host: "127.0.0.1", port: 0)
             .get()
-        return try HTTP1FixtureServer(channel: channel, accepts: accepts, hold: hold)
+        return try HTTP1FixtureServer(channel: channel, accepts: accepts, gates: gates)
     }
 
-    private init(channel: any Channel, accepts: AcceptCounter, hold: HoldGate) throws {
+    private init(channel: any Channel, accepts: AcceptCounter, gates: FixtureGates) throws {
         guard let port = channel.localAddress?.port else {
             throw FixtureServerError.missingPort
         }
         self.channel = channel
         self.port = port
         self.accepts = accepts
-        self.hold = hold
+        self.gates = gates
     }
 
     func url(_ path: String) -> URL {
@@ -66,8 +68,10 @@ final class TLSFixtureServer {
 
     let port: Int
     let accepts: AcceptCounter
-    let hold: HoldGate
+    let gates: FixtureGates
     private let channel: any Channel
+
+    var hold: HoldGate { gates.hold }
 
     static func bind(_ mode: Mode) async throws -> TLSFixtureServer {
         let material = LocalTLSMaterial.shared
@@ -79,7 +83,7 @@ final class TLSFixtureServer {
         tls.applicationProtocols = mode == .http2 ? ["h2"] : ["http/1.1"]
         let context = try NIOSSLContext(configuration: tls)
         let accepts = AcceptCounter()
-        let hold = HoldGate()
+        let gates = FixtureGates()
 
         let channel = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
@@ -92,7 +96,7 @@ final class TLSFixtureServer {
                     switch mode {
                     case .http1:
                         try channel.pipeline.syncOperations.configureHTTPServerPipeline()
-                        try channel.pipeline.syncOperations.addHandler(FixtureHTTPHandler(hold: hold))
+                        try channel.pipeline.syncOperations.addHandler(FixtureHTTPHandler(gates: gates))
                     case .http2:
                         var connection = NIOHTTP2Handler.ConnectionConfiguration()
                         connection.targetWindowSize = 1_048_576
@@ -108,7 +112,7 @@ final class TLSFixtureServer {
                                         HTTP2FramePayloadToHTTP1ServerCodec()
                                     )
                                     try streamChannel.pipeline.syncOperations.addHandler(
-                                        FixtureHTTPHandler(hold: hold)
+                                        FixtureHTTPHandler(gates: gates)
                                     )
                                 }
                             }
@@ -118,17 +122,17 @@ final class TLSFixtureServer {
             }
             .bind(host: "127.0.0.1", port: 0)
             .get()
-        return try TLSFixtureServer(channel: channel, accepts: accepts, hold: hold)
+        return try TLSFixtureServer(channel: channel, accepts: accepts, gates: gates)
     }
 
-    private init(channel: any Channel, accepts: AcceptCounter, hold: HoldGate) throws {
+    private init(channel: any Channel, accepts: AcceptCounter, gates: FixtureGates) throws {
         guard let port = channel.localAddress?.port else {
             throw FixtureServerError.missingPort
         }
         self.channel = channel
         self.port = port
         self.accepts = accepts
-        self.hold = hold
+        self.gates = gates
     }
 
     func url(_ path: String) -> URL {

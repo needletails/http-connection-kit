@@ -21,10 +21,37 @@ extension HTTPConnection {
     public struct Configuration: Sendable {
         public var tls: TLS
         public var channel: Channel
+        public var cookieJar: CookieJar
+        public var authenticator: HTTPAuthenticator?
+        public var onProgress: (@Sendable (HTTPProgress) -> Void)?
+        public var followRedirects: Bool
+        public var maximumRedirects: Int
+        public var decompressResponses: Bool
+        public var decompressionRatioLimit: Int
+        public var expectContinueTimeout: Interval
 
-        public init(tls: TLS = TLS(), channel: Channel = Channel()) {
+        public init(
+            tls: TLS = TLS(),
+            channel: Channel = Channel(),
+            cookieJar: CookieJar = CookieJar(),
+            authenticator: HTTPAuthenticator? = nil,
+            onProgress: (@Sendable (HTTPProgress) -> Void)? = nil,
+            followRedirects: Bool = true,
+            maximumRedirects: Int = 8,
+            decompressResponses: Bool = true,
+            decompressionRatioLimit: Int = 100,
+            expectContinueTimeout: Interval = .seconds(1)
+        ) {
             self.tls = tls
             self.channel = channel
+            self.cookieJar = cookieJar
+            self.authenticator = authenticator
+            self.onProgress = onProgress
+            self.followRedirects = followRedirects
+            self.maximumRedirects = maximumRedirects
+            self.decompressResponses = decompressResponses
+            self.decompressionRatioLimit = decompressionRatioLimit
+            self.expectContinueTimeout = expectContinueTimeout
         }
 
         /// TLS bounds and certificate checking for TCP and QUIC.

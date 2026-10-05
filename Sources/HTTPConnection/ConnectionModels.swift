@@ -5,6 +5,7 @@
 //  Created by NeedleTails on 10/5/26.
 //
 
+import Foundation
 import NIOCore
 import NIOHTTP1
 
@@ -16,6 +17,31 @@ struct RequestComponents: Sendable {
     var path: String
     var authority: String
     var enableTLS: Bool
+
+    var pathWithoutQuery: String {
+        if let query = path.firstIndex(of: "?") {
+            return String(path[..<query])
+        }
+        return path
+    }
+
+    var url: URL {
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = host
+        let defaultPort = scheme == "https" ? 443 : 80
+        if port != defaultPort {
+            components.port = port
+        }
+        let raw = path
+        if let query = raw.firstIndex(of: "?") {
+            components.percentEncodedPath = String(raw[..<query])
+            components.percentEncodedQuery = String(raw[raw.index(after: query)...])
+        } else {
+            components.percentEncodedPath = raw
+        }
+        return components.url ?? URL(string: "\(scheme)://\(authority)\(path)")!
+    }
 }
 
 /// Identity of one pooled connection. The version is the protocol the handshake selected.

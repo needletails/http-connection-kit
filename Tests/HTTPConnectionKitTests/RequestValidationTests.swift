@@ -25,6 +25,13 @@ struct RequestValidationTests {
         #expect(configuration.channel.maximumReceiveLength == 65_535)
         #expect(configuration.channel.udpBufferBytes == 1 << 21)
         #expect(configuration.channel.quicIdleTimeout.nanoseconds == 30_000_000_000)
+        #expect(configuration.followRedirects)
+        #expect(configuration.maximumRedirects == 8)
+        #expect(configuration.decompressResponses)
+        #expect(configuration.decompressionRatioLimit == 100)
+        #expect(configuration.expectContinueTimeout.nanoseconds == 1_000_000_000)
+        #expect(configuration.authenticator == nil)
+        #expect(configuration.onProgress == nil)
         #expect(HTTPConnection.Configuration.Interval.seconds(2).nanoseconds == 2_000_000_000)
         #expect(HTTPConnection.Configuration.Interval.milliseconds(5).nanoseconds == 5_000_000)
     }

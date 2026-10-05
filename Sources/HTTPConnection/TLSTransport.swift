@@ -11,6 +11,7 @@ import NIOHTTP1
 import NIOHTTP2
 import NIOTLS
 import NIOSSL
+import NIOHTTPCompression
 #if canImport(Network)
 import Network
 import Security
@@ -21,16 +22,22 @@ final class NegotiationSlot: @unchecked Sendable {
     private let lock = NSLock()
     private var handler: NIOTypedApplicationProtocolNegotiationHandler<HTTPVersion>?
     private let http1: HTTPVersion
+    private let decompressionLimit: NIOHTTPDecompression.DecompressionLimit?
 
-    init(http1: HTTPVersion) {
+    init(http1: HTTPVersion, decompressionLimit: NIOHTTPDecompression.DecompressionLimit? = nil) {
         self.http1 = http1
+        self.decompressionLimit = decompressionLimit
     }
 
     /// Adds the negotiation handler on the channel's event loop and keeps it after ALPN completes.
     func install(on channel: Channel) -> EventLoopFuture<Void> {
         let http1 = self.http1
+        let decompressionLimit = self.decompressionLimit
         return channel.eventLoop.makeCompletedFuture {
-            let handler = HTTPConnection.protocolNegotiationHandler(http1: http1)
+            let handler = HTTPConnection.protocolNegotiationHandler(
+                http1: http1,
+                decompressionLimit: decompressionLimit
+            )
             self.lock.lock()
             self.handler = handler
             self.lock.unlock()
@@ -51,7 +58,8 @@ extension HTTPConnection {
     ///
     /// A missing ALPN token is HTTP/1. Servers that do not negotiate still speak HTTP/1.1.
     static func protocolNegotiationHandler(
-        http1: HTTPVersion
+        http1: HTTPVersion,
+        decompressionLimit: NIOHTTPDecompression.DecompressionLimit?
     ) -> NIOTypedApplicationProtocolNegotiationHandler<HTTPVersion> {
         NIOTypedApplicationProtocolNegotiationHandler { result, channel in
             let negotiated: HTTPVersion
@@ -65,7 +73,7 @@ extension HTTPConnection {
             if negotiated == .http2 {
                 configured = Self.installHTTP2Handlers(on: channel, enableTLS: true)
             } else {
-                configured = Self.installHTTP1Handlers(on: channel)
+                configured = Self.installHTTP1Handlers(on: channel, decompressionLimit: decompressionLimit)
             }
             return configured.map { negotiated }
         }
@@ -81,7 +89,8 @@ extension HTTPConnection {
         enableTLS: Bool,
         negotiateTLSInPipeline: Bool,
         tls: Configuration.TLS,
-        negotiation: NegotiationSlot?
+        negotiation: NegotiationSlot?,
+        decompressionLimit: NIOHTTPDecompression.DecompressionLimit? = nil
     ) -> EventLoopFuture<Void> {
         let prepared: EventLoopFuture<Void>
         if negotiateTLSInPipeline && enableTLS {
@@ -103,17 +112,25 @@ extension HTTPConnection {
             if let negotiation {
                 return negotiation.install(on: channel)
             }
-            return Self.installHTTP1Handlers(on: channel)
+            return Self.installHTTP1Handlers(on: channel, decompressionLimit: decompressionLimit)
         }
     }
 
     /// HTTP/1 client codecs. Used directly when HTTP/2 is not offered, and after ALPN falls back.
-    static func installHTTP1Handlers(on channel: Channel) -> EventLoopFuture<Void> {
+    static func installHTTP1Handlers(
+        on channel: Channel,
+        decompressionLimit: NIOHTTPDecompression.DecompressionLimit? = nil
+    ) -> EventLoopFuture<Void> {
         channel.pipeline.addHTTPClientHandlers(
             enableOutboundHeaderValidation: true,
             encoderConfiguration: HTTPRequestEncoder.Configuration(),
             decoderLimitConfiguration: NIOHTTPDecoderLimitConfiguration()
-        )
+        ).flatMap { _ in
+            guard let decompressionLimit else {
+                return channel.eventLoop.makeSucceededVoidFuture()
+            }
+            return channel.pipeline.addHandler(NIOHTTPResponseDecompressor(limit: decompressionLimit))
+        }
     }
 
     /// Client HTTP/2 pipeline. Inbound streams are translated back to HTTP/1 parts.

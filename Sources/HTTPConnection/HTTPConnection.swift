@@ -82,8 +82,118 @@ public actor HTTPConnection: Request {
         }
     }
 
+    /// Sends a body sequence and collects the response.
+    public func request(
+        method: HTTPRequest.Method,
+        url: URL,
+        headers: HTTPFields,
+        body: HTTPBody
+    ) async throws -> Response {
+        try await collectedRequest(method: method, url: url, headers: headers, body: body)
+    }
+
+    /// Sends chunks from any `AsyncSequence` and collects the response.
+    public func request<S: AsyncSequence & Sendable>(
+        method: HTTPRequest.Method,
+        url: URL,
+        headers: HTTPFields,
+        body: S
+    ) async throws -> Response where S.Element == Data {
+        let stream = HTTPBody.sequence(body)
+        return try await collectedRequest(method: method, url: url, headers: headers, body: stream)
+    }
+
+    /// Returns the response head and a body that is pulled from the socket.
+    public func requestStream(
+        method: HTTPRequest.Method,
+        url: URL,
+        headers: HTTPFields = [:],
+        body: HTTPBody? = nil
+    ) async throws -> StreamingResponse {
+        let result = try await requestPrepared(
+            method: method,
+            url: url,
+            headers: headers,
+            body: body,
+            collect: false
+        )
+        switch result {
+        case .streaming(let streamed):
+            return streamed
+        case .collected(let response):
+            let trailerBox = TrailerBox()
+            await trailerBox.set(HTTPFields())
+            return StreamingResponse(
+                head: response.head,
+                body: HTTPBody.data(response.body ?? Data()),
+                trailerBox: trailerBox
+            )
+        }
+    }
+
+    public func requestStream(
+        method: HTTPRequest.Method,
+        url: URL,
+        headers: HTTPFields,
+        body: Data?
+    ) async throws -> StreamingResponse {
+        try await requestStream(
+            method: method,
+            url: url,
+            headers: headers,
+            body: body.map(HTTPBody.data)
+        )
+    }
+
+    public func requestStream<S: AsyncSequence & Sendable>(
+        method: HTTPRequest.Method,
+        url: URL,
+        headers: HTTPFields = [:],
+        body: S
+    ) async throws -> StreamingResponse where S.Element == Data {
+        try await requestStream(
+            method: method,
+            url: url,
+            headers: headers,
+            body: Optional(HTTPBody.sequence(body))
+        )
+    }
+
+    public func requestStream(
+        method: HTTPRequest.Method,
+        url: URL,
+        headers: HTTPFields = [:],
+        body: HTTPBody
+    ) async throws -> StreamingResponse {
+        try await requestStream(
+            method: method,
+            url: url,
+            headers: headers,
+            body: Optional(body)
+        )
+    }
+
+    private func collectedRequest(
+        method: HTTPRequest.Method,
+        url: URL,
+        headers: HTTPFields,
+        body: HTTPBody?
+    ) async throws -> Response {
+        let result = try await requestPrepared(
+            method: method,
+            url: url,
+            headers: headers,
+            body: body,
+            collect: true
+        )
+        guard case .collected(let response) = result else {
+            throw HTTPConnectionError.invalidRequest
+        }
+        return response
+    }
+
     /// Accepts `http` and `https` URLs and builds the path, query, and authority the wire request uses.
-    private func requestComponents(from url: URL) throws -> RequestComponents {
+    func requestComponents(from url: URL) throws -> RequestComponents {
         guard
             let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
             let scheme = parts.scheme?.lowercased(),
@@ -214,76 +324,17 @@ public actor HTTPConnection: Request {
     }
 
     /// Opens the request channel for the negotiated protocol, then reads the response.
-    ///
-    /// HTTP/2 and HTTP/3 keep the connection and wrap each request stream. HTTP/1's request channel
-    /// is the connection, and closing the request closes that connection. Cancellation closes whichever
-    /// channel the request currently owns.
     private func performExchange(
         _ method: HTTPRequest.Method,
         _ components: RequestComponents,
         headers: HTTPFields,
         body: Data?
     ) async throws -> Response {
-        let cancelTarget = CancelTarget()
-        return try await withTaskCancellationHandler {
-            let connection = try await self.connection(for: components, cancelTarget: cancelTarget)
-            if connection.created {
-                cancelTarget.set(connection.channel, closesParent: true)
-            }
-            if connection.version == .http2 {
-                let request = try await Self.openHTTP2Request(
-                    on: connection.channel,
-                    enableTLS: components.enableTLS,
-                    cancelTarget: cancelTarget
-                )
-                return try await request.executeThenClose { inbound, outbound in
-                    try await Self.exchangeHTTP1(
-                        method: method,
-                        components: components,
-                        headers: headers,
-                        body: body,
-                        requestVersion: .http1_1,
-                        inbound: inbound,
-                        outbound: outbound
-                    )
-                }
-            } else if connection.version == .http3 {
-                guard #available(anyAppleOS 26, *) else {
-                    throw HTTPConnectionError.unimplemented
-                }
-                let request = try await Self.openHTTP3Request(
-                    on: connection.channel,
-                    cancelTarget: cancelTarget
-                )
-                return try await request.executeThenClose { inbound, outbound in
-                    try await Self.exchangeHTTP3(
-                        method: method,
-                        components: components,
-                        headers: headers,
-                        body: body,
-                        inbound: inbound,
-                        outbound: outbound
-                    )
-                }
-            } else {
-                let request = try await Self.openHTTP1Request(
-                    on: connection.channel,
-                    cancelTarget: cancelTarget
-                )
-                return try await request.executeThenClose { inbound, outbound in
-                    try await Self.exchangeHTTP1(
-                        method: method,
-                        components: components,
-                        headers: headers,
-                        body: body,
-                        requestVersion: connection.version,
-                        inbound: inbound,
-                        outbound: outbound
-                    )
-                }
-            }
-        } onCancel: {
-            cancelTarget.close()
-        }
+        try await collectedRequest(
+            method: method,
+            url: components.url,
+            headers: headers,
+            body: body.map(HTTPBody.data)
+        )
     }
 }

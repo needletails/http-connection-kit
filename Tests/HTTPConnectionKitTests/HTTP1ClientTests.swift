@@ -231,6 +231,54 @@ struct HTTP1ClientTests {
     }
 }
 
+enum TestHTTP: String, CaseIterable {
+    case http1
+    case http2
+}
+
+@discardableResult
+func withLocalClient<T>(
+    _ version: TestHTTP,
+    configuration: HTTPConnection.Configuration = HTTPConnection.Configuration(),
+    _ body: (HTTPConnection, (String) -> URL, FixtureGates, AcceptCounter) async throws -> T
+) async throws -> T {
+    switch version {
+    case .http1:
+        return try await withHTTP1Client(configuration: configuration) { client, server in
+            try await body(client, server.url, server.gates, server.accepts)
+        }
+    case .http2:
+        var configuration = configuration
+        if configuration.tls.certificateVerification == .fullVerification {
+            configuration.tls.certificateVerification = .none
+        }
+        return try await withTLSClient(
+            mode: .http2,
+            preferred: .http2,
+            configuration: configuration
+        ) { client, server in
+            try await body(client, server.url, server.gates, server.accepts)
+        }
+    }
+}
+
+final class ProgressLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [HTTPProgress] = []
+
+    func append(_ progress: HTTPProgress) {
+        lock.lock()
+        values.append(progress)
+        lock.unlock()
+    }
+
+    func snapshot() -> [HTTPProgress] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
+    }
+}
+
 func waitForTask(_ task: Task<some Any, any Error>, seconds: Int) async -> Bool {
     await withTaskGroup(of: Bool.self) { group in
         group.addTask {

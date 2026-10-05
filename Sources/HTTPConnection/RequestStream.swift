@@ -8,6 +8,7 @@
 import NIOCore
 import NIOHTTP1
 import NIOHTTP2
+import NIOHTTPCompression
 
 /// Holds the HTTP/2 stream channel created inside the multiplexer initializer.
 ///
@@ -15,6 +16,14 @@ import NIOHTTP2
 /// that initializer has finished.
 final class PreparedHTTP1Request: @unchecked Sendable {
     var channel: NIOAsyncChannel<HTTPClientResponsePart, HTTPClientRequestPart>?
+}
+
+final class HTTP1RequestBox: @unchecked Sendable {
+    let request: NIOAsyncChannel<HTTPClientResponsePart, HTTPClientRequestPart>
+
+    init(_ request: NIOAsyncChannel<HTTPClientResponsePart, HTTPClientRequestPart>) {
+        self.request = request
+    }
 }
 
 extension HTTPConnection {
@@ -45,7 +54,8 @@ extension HTTPConnection {
     static func openHTTP2Request(
         on connection: Channel,
         enableTLS: Bool,
-        cancelTarget: CancelTarget
+        cancelTarget: CancelTarget,
+        decompressionLimit: NIOHTTPDecompression.DecompressionLimit? = nil
     ) async throws -> NIOAsyncChannel<HTTPClientResponsePart, HTTPClientRequestPart> {
         let httpProtocol: HTTP2FramePayloadToHTTP1ClientCodec.HTTPProtocol = enableTLS ? .https : .http
         let prepared = PreparedHTTP1Request()
@@ -60,6 +70,11 @@ extension HTTPConnection {
                         try stream.pipeline.syncOperations.addHandler(
                             HTTP2FramePayloadToHTTP1ClientCodec(httpProtocol: httpProtocol)
                         )
+                        if let decompressionLimit {
+                            try stream.pipeline.syncOperations.addHandler(
+                                NIOHTTPResponseDecompressor(limit: decompressionLimit)
+                            )
+                        }
                         prepared.channel = try NIOAsyncChannel<HTTPClientResponsePart, HTTPClientRequestPart>(
                             wrappingChannelSynchronously: stream,
                             configuration: .init(isOutboundHalfClosureEnabled: true)

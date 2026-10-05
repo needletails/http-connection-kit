@@ -9,6 +9,7 @@ import Foundation
 import NIO
 import NIOCore
 import NIOHTTP1
+import NIOHTTPCompression
 import NIOTransportServices
 
 /// One side of the HTTP/3 race. Failures stay in `RaceFailures` because `Error` is not `Sendable`.
@@ -294,7 +295,11 @@ extension HTTPConnection {
     ) async throws -> (Channel, HTTPVersion) {
         let offerHTTP2 = components.enableTLS && version.major >= 2
         let http1 = http1RequestVersion
-        let negotiation = offerHTTP2 ? NegotiationSlot(http1: http1) : nil
+        let decompressionLimit: NIOHTTPDecompression.DecompressionLimit? =
+            configuration.decompressResponses
+            ? .ratio(max(configuration.decompressionRatioLimit, 1))
+            : nil
+        let negotiation = offerHTTP2 ? NegotiationSlot(http1: http1, decompressionLimit: decompressionLimit) : nil
         let channelOptions = configuration.channel
         let tls = configuration.tls
         let connectTimeout = Self.timeAmount(channelOptions.connectTimeout)
@@ -320,7 +325,8 @@ extension HTTPConnection {
                     enableTLS: components.enableTLS,
                     negotiateTLSInPipeline: false,
                     tls: tls,
-                    negotiation: negotiation
+                    negotiation: negotiation,
+                    decompressionLimit: decompressionLimit
                 )
             }
         if components.enableTLS {
@@ -345,7 +351,8 @@ extension HTTPConnection {
                         enableTLS: components.enableTLS,
                         negotiateTLSInPipeline: true,
                         tls: tls,
-                        negotiation: negotiation
+                        negotiation: negotiation,
+                        decompressionLimit: decompressionLimit
                     )
                 }
                 .connect(host: components.host, port: components.port)
