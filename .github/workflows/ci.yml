@@ -38,7 +38,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev
+          sudo apt-get install -y libcurl4-openssl-dev zlib1g-dev
 
       - name: Install Swift 6.4.0 (Linux)
         if: runner.os == 'Linux'
@@ -51,13 +51,19 @@ jobs:
           # shellcheck disable=SC1091
           source "${SWIFTLY_HOME_DIR:-$HOME/.local/share/swiftly}/env.sh"
           swiftly install --assume-yes --use 6.4.0
-          SWIFT_BIN=$(find "$HOME/.local/share/swiftly/toolchains" -type f -path '*/usr/bin/swift' | head -1)
-          if [ -z "$SWIFT_BIN" ]; then
+          TOOLCHAIN_BIN=""
+          for candidate in "$HOME"/.local/share/swiftly/toolchains/*/usr/bin; do
+            if [ -x "$candidate/swift" ]; then
+              TOOLCHAIN_BIN=$candidate
+              break
+            fi
+          done
+          if [ -z "$TOOLCHAIN_BIN" ]; then
             echo "Swift 6.4.0 toolchain was not installed" >&2
-            find "$HOME/.local/share/swiftly" -name swift -type f >&2 || true
+            find "$HOME/.local/share/swiftly" -name swift >&2 || true
             exit 1
           fi
-          echo "$(dirname "$SWIFT_BIN")" >> "$GITHUB_PATH"
+          echo "$TOOLCHAIN_BIN" >> "$GITHUB_PATH"
 
       - name: Install Swift 6.4.0 (macOS)
         if: runner.os == 'macOS'
@@ -70,13 +76,21 @@ jobs:
           # shellcheck disable=SC1091
           source "${SWIFTLY_HOME_DIR:-$HOME/.swiftly}/env.sh"
           swiftly install --assume-yes --use 6.4.0
-          SWIFT_BIN=$(find "$HOME/.swiftly/toolchains" "$HOME/.local/share/swiftly/toolchains" -type f -path '*/usr/bin/swift' 2>/dev/null | head -1)
-          if [ -z "$SWIFT_BIN" ]; then
+          TOOLCHAIN_DIR=""
+          for candidate in "$HOME"/Library/Developer/Toolchains/swift-6.4*.xctoolchain; do
+            if [ -d "$candidate" ]; then
+              TOOLCHAIN_DIR=$candidate
+              break
+            fi
+          done
+          if [ -z "$TOOLCHAIN_DIR" ]; then
             echo "Swift 6.4.0 toolchain was not installed" >&2
-            find "$HOME/.swiftly" "$HOME/.local/share/swiftly" -name swift -type f >&2 || true
+            ls -la "$HOME/Library/Developer/Toolchains" >&2 || true
             exit 1
           fi
-          echo "$(dirname "$SWIFT_BIN")" >> "$GITHUB_PATH"
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$TOOLCHAIN_DIR/Info.plist")
+          echo "TOOLCHAINS=$BUNDLE_ID" >> "$GITHUB_ENV"
+          echo "$TOOLCHAIN_DIR/usr/bin" >> "$GITHUB_PATH"
 
       - name: Require Swift 6.4
         shell: bash
