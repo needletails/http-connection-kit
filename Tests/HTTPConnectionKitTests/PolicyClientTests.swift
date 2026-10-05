@@ -278,6 +278,28 @@ struct HTTP3DecompressionTests {
             #expect(try await streamed.body.collect() == Data("hello-deflate".utf8))
         }
     }
+
+    @Test func concurrentGzipStreamsInflate() async throws {
+        guard #available(anyAppleOS 26, *) else { return }
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<6 {
+                group.addTask {
+                    try await withHTTP3Client { client, server in
+                        let gzip = try await client.request(
+                            method: .get,
+                            url: server.url("/gzip"),
+                            headers: [:],
+                            body: nil
+                        )
+                        #expect(gzip.body == Data("hello-gzip".utf8))
+                        let streamed = try await client.requestStream(method: .get, url: server.url("/deflate"))
+                        #expect(try await streamed.body.collect() == Data("hello-deflate".utf8))
+                    }
+                }
+            }
+            try await group.waitForAll()
+        }
+    }
 }
 
 @Suite("Challenge parsing")

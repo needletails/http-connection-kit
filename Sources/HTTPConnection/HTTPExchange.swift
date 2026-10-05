@@ -119,20 +119,41 @@ extension HTTPConnection {
         try await outbound.write(.end(nil))
     }
 
-    static func writeHTTP3Request(
-        _ context: ExchangeContext,
-        outbound: NIOAsyncChannelOutboundWriter<HTTPRequestPart>
-    ) async throws {
-        let request = HTTPRequest(
+    static func http3Request(_ context: ExchangeContext) -> HTTPRequest {
+        HTTPRequest(
             method: context.method,
             scheme: context.components.scheme,
             authority: context.components.authority,
             path: context.components.path,
             headerFields: http3Fields(headers: context.headers, length: context.body?.length)
         )
-        try await outbound.write(.head(request))
+    }
+
+    static func writeHTTP3Request(
+        _ context: ExchangeContext,
+        outbound: NIOAsyncChannelOutboundWriter<HTTPRequestPart>
+    ) async throws {
+        try await outbound.write(.head(http3Request(context)))
         try await writeHTTP3Body(context.body, outbound: outbound, progress: context.onProgress)
         try await outbound.write(.end(nil))
+    }
+
+    /// Writes a bodyless HTTP/3 request and its FIN in one turn on the stream's event loop.
+    ///
+    /// The HEADERS bytes stay in the QUIC buffer until the FIN is attached, so the server receives
+    /// one complete STREAM frame.
+    static func writeEmptyHTTP3Request(
+        on channel: Channel,
+        context: ExchangeContext
+    ) async throws {
+        let head = HTTPRequestPart.head(http3Request(context))
+        try await channel.eventLoop.flatSubmit { () -> EventLoopFuture<Void> in
+            let promise = channel.eventLoop.makePromise(of: Void.self)
+            channel.write(head, promise: nil)
+            channel.write(HTTPRequestPart.end(nil), promise: promise)
+            channel.flush()
+            return promise.futureResult
+        }.get()
     }
 
     private static func writeBody(

@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import HTTPConnection
 import HTTPTypes
 import Logging
 import NIOCore
@@ -51,7 +52,12 @@ final class HTTP3FixtureServer {
         let accepts = AcceptCounter()
         let gates = FixtureGates()
 
-        let channel = try await DatagramBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+        #if canImport(Network)
+        let group = MultiThreadedEventLoopGroup.singleton
+        #else
+        let group = HTTP3EventLoop.shared
+        #endif
+        let channel = try await DatagramBootstrap(group: group)
             .channelOption(.socketOption(.so_reuseaddr), value: 1)
             .channelOption(.recvAllocator, value: FixedSizeRecvByteBufferAllocator(capacity: 65_535))
             .channelInitializer { channel in

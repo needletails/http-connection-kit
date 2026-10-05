@@ -533,8 +533,22 @@ extension HTTPConnection {
         let trailerBox = TrailerBox()
         let box = HTTP3RequestBox(request)
         let capturedContext = context
+        let bodyAlreadyOnWire = context.body == nil
+        if bodyAlreadyOnWire {
+            do {
+                try await Self.writeEmptyHTTP3Request(on: request.channel, context: context)
+            } catch {
+                request.channel.close(promise: nil)
+                throw error
+            }
+        }
         let task = Task.detached {
-            await pumpHTTP3(box: box, context: capturedContext, mailbox: mailbox)
+            await pumpHTTP3(
+                box: box,
+                context: capturedContext,
+                mailbox: mailbox,
+                writesRequest: !bodyAlreadyOnWire
+            )
         }
         let lifetime = StreamLifetime(task: task)
         var head: HTTPResponse?
@@ -703,11 +717,14 @@ func pumpHTTP1(
 func pumpHTTP3(
     box: HTTP3RequestBox,
     context: ExchangeContext,
-    mailbox: InboundMailbox<HTTPResponsePart>
+    mailbox: InboundMailbox<HTTPResponsePart>,
+    writesRequest: Bool = true
 ) async {
     do {
         try await box.request.executeThenClose { inbound, outbound in
-            try await HTTPConnection.writeHTTP3Request(context, outbound: outbound)
+            if writesRequest {
+                try await HTTPConnection.writeHTTP3Request(context, outbound: outbound)
+            }
             do {
                 for try await part in inbound {
                     await mailbox.yield(part)

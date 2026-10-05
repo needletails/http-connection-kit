@@ -70,6 +70,7 @@ let package = Package(
         .testTarget(
             name: "HTTPConnectionKitTests",
             dependencies: [
+                "HTTPConnection",
                 "HTTPConnectionKit",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOCore", package: "swift-nio"),
