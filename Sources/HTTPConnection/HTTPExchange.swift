@@ -82,7 +82,7 @@ actor InboundMailbox<Part: Sendable> {
             if let timeoutNanoseconds {
                 Task {
                     try? await Task.sleep(nanoseconds: max(timeoutNanoseconds, 1))
-                    await self.expire(generation: captured)
+                    self.expire(generation: captured)
                 }
             }
         }

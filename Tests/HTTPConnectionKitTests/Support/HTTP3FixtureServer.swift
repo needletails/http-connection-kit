@@ -53,6 +53,7 @@ final class HTTP3FixtureServer {
 
         let channel = try await DatagramBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .channelOption(.socketOption(.so_reuseaddr), value: 1)
+            .channelOption(.recvAllocator, value: FixedSizeRecvByteBufferAllocator(capacity: 65_535))
             .channelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
                     let handler = QUICHandler(

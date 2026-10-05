@@ -101,7 +101,10 @@ extension HTTPConnection {
                 configuration.certificateVerification = tls.certificateVerification.niossl
                 configuration.applicationProtocols = protocols
                 let context = try NIOSSLContext(configuration: configuration)
-                let handler = try NIOSSLClientHandler(context: context, serverHostname: serverHostname)
+                let handler = try NIOSSLClientHandler(
+                    context: context,
+                    serverHostname: Self.sniServerName(serverHostname)
+                )
                 try channel.pipeline.syncOperations.addHandler(handler)
             }
         } else {
@@ -129,7 +132,14 @@ extension HTTPConnection {
             guard let decompressionLimit else {
                 return channel.eventLoop.makeSucceededVoidFuture()
             }
-            return channel.pipeline.addHandler(NIOHTTPResponseDecompressor(limit: decompressionLimit))
+            do {
+                try channel.pipeline.syncOperations.addHandler(
+                    NIOHTTPResponseDecompressor(limit: decompressionLimit)
+                )
+                return channel.eventLoop.makeSucceededVoidFuture()
+            } catch {
+                return channel.eventLoop.makeFailedFuture(error)
+            }
         }
     }
 
@@ -159,6 +169,14 @@ extension HTTPConnection {
                 }
             }
         ).map { _ in () }
+    }
+
+    /// SNI carries a hostname. An IP literal is not a legal server name, and NIOSSL rejects it.
+    static func sniServerName(_ host: String) -> String? {
+        if (try? SocketAddress(ipAddress: host, port: 0)) != nil {
+            return nil
+        }
+        return host
     }
 
     /// ALPN tokens for one TCP handshake. HTTP/2 is offered ahead of HTTP/1.1 when the cap allows it.

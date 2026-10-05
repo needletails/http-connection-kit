@@ -141,8 +141,8 @@ final class SequenceReader<S: AsyncSequence>: @unchecked Sendable where S.Elemen
         iterator = sequence.makeAsyncIterator()
     }
 
-    func next() async throws -> Data? {
-        try await iterator.next()
+    nonisolated(nonsending) func next() async throws -> Data? {
+        try await iterator.next(isolation: #isolation)
     }
 }
 

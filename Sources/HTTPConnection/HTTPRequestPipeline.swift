@@ -692,7 +692,7 @@ func pumpHTTP1(
             }
             defer { reader.cancel() }
             _ = try await HTTPConnection.writeOpeningHTTP1(context, outbound: outbound, mailbox: mailbox)
-            try await reader.value
+            await reader.value
         }
     } catch {
         await mailbox.fail(HTTPConnection.mapDecompression(error))
