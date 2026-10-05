@@ -22,35 +22,47 @@ extension HTTPConnection {
         public var tls: TLS
         public var channel: Channel
         public var cookieJar: CookieJar
-        public var authenticator: HTTPAuthenticator?
+        public var authentication: (any HTTPAuthenticationProvider)?
+        public var proxyAuthentication: (any HTTPAuthenticationProvider)?
+        public var authenticationRefreshWindow: HTTPAuthenticationRefreshWindow
         public var onProgress: (@Sendable (HTTPProgress) -> Void)?
         public var followRedirects: Bool
         public var maximumRedirects: Int
         public var decompressResponses: Bool
         public var decompressionRatioLimit: Int
+        public var maximumBufferedBodySize: Int
+        public var requestTimeout: Interval?
         public var expectContinueTimeout: Interval
 
         public init(
             tls: TLS = TLS(),
             channel: Channel = Channel(),
             cookieJar: CookieJar = CookieJar(),
-            authenticator: HTTPAuthenticator? = nil,
+            authentication: (any HTTPAuthenticationProvider)? = nil,
+            proxyAuthentication: (any HTTPAuthenticationProvider)? = nil,
+            authenticationRefreshWindow: HTTPAuthenticationRefreshWindow = HTTPAuthenticationRefreshWindow(),
             onProgress: (@Sendable (HTTPProgress) -> Void)? = nil,
             followRedirects: Bool = true,
             maximumRedirects: Int = 8,
             decompressResponses: Bool = true,
             decompressionRatioLimit: Int = 100,
+            maximumBufferedBodySize: Int = 64 * 1024 * 1024,
+            requestTimeout: Interval? = .seconds(60),
             expectContinueTimeout: Interval = .seconds(1)
         ) {
             self.tls = tls
             self.channel = channel
             self.cookieJar = cookieJar
-            self.authenticator = authenticator
+            self.authentication = authentication
+            self.proxyAuthentication = proxyAuthentication
+            self.authenticationRefreshWindow = authenticationRefreshWindow
             self.onProgress = onProgress
             self.followRedirects = followRedirects
             self.maximumRedirects = maximumRedirects
             self.decompressResponses = decompressResponses
             self.decompressionRatioLimit = decompressionRatioLimit
+            self.maximumBufferedBodySize = maximumBufferedBodySize
+            self.requestTimeout = requestTimeout
             self.expectContinueTimeout = expectContinueTimeout
         }
 

@@ -23,6 +23,8 @@ public actor HTTPConnection: Request {
     let version: HTTPVersion
     /// Channel and TLS settings applied to every connection this client opens.
     let configuration: Configuration
+    let authenticationSession: (any HTTPAuthenticationSession)?
+    let proxyAuthenticationSession: (any HTTPAuthenticationSession)?
     var connections: [ObjectIdentifier: LiveConnection] = [:]
     /// Origins whose QUIC handshake failed while TCP succeeded. Later requests on this client use TCP.
     var quicDeniedOrigins: Set<Origin> = []
@@ -31,6 +33,20 @@ public actor HTTPConnection: Request {
     public init(preferred version: HTTPVersion = .http3, configuration: Configuration = Configuration()) {
         self.version = version
         self.configuration = configuration
+        authenticationSession = configuration.authentication.map {
+            makeAuthenticationSession($0, window: configuration.authenticationRefreshWindow)
+        }
+        proxyAuthenticationSession = configuration.proxyAuthentication.map {
+            makeAuthenticationSession($0, window: configuration.authenticationRefreshWindow)
+        }
+    }
+
+    deinit {
+        // Channel.close is thread-safe. Deinitialization cannot await, so this is deliberately a
+        // best-effort safety net; shutdown() remains the deterministic way to wait for cleanup.
+        for connection in connections.values {
+            connection.channel.close(promise: nil)
+        }
     }
 
     /// Closes every connection this client still holds.
@@ -51,8 +67,8 @@ public actor HTTPConnection: Request {
     public func request(
         method: HTTPRequest.Method,
         url: URL,
-        headers: HTTPFields,
-        body: Data?
+        headers: HTTPFields = [:],
+        body: Data? = nil
     ) async throws -> Response {
         let components = try requestComponents(from: url)
 
@@ -80,6 +96,19 @@ public actor HTTPConnection: Request {
         default:
             return try await performExtension(method, components, headers: headers, body: body)
         }
+    }
+
+    /// Sends a swift-http-types request and collects the response.
+    public func request(
+        _ request: HTTPRequest,
+        body: HTTPBody? = nil
+    ) async throws -> Response {
+        try await collectedRequest(
+            method: request.method,
+            url: try requestURL(request),
+            headers: request.headerFields,
+            body: body
+        )
     }
 
     /// Sends a body sequence and collects the response.
@@ -129,6 +158,19 @@ public actor HTTPConnection: Request {
                 trailerBox: trailerBox
             )
         }
+    }
+
+    /// Sends a swift-http-types request and streams the response body.
+    public func requestStream(
+        _ request: HTTPRequest,
+        body: HTTPBody? = nil
+    ) async throws -> StreamingResponse {
+        try await requestStream(
+            method: request.method,
+            url: try requestURL(request),
+            headers: request.headerFields,
+            body: body
+        )
     }
 
     public func requestStream(
@@ -190,6 +232,21 @@ public actor HTTPConnection: Request {
             throw HTTPConnectionError.invalidRequest
         }
         return response
+    }
+
+    private func requestURL(_ request: HTTPRequest) throws -> URL {
+        guard let scheme = request.scheme,
+              let authority = request.authority,
+              !scheme.isEmpty,
+              !authority.isEmpty
+        else {
+            throw HTTPConnectionError.invalidRequest
+        }
+        let path = request.path ?? "/"
+        guard let url = URL(string: "\(scheme)://\(authority)\(path)") else {
+            throw HTTPConnectionError.invalidRequest
+        }
+        return url
     }
 
     /// Accepts `http` and `https` URLs and builds the path, query, and authority the wire request uses.

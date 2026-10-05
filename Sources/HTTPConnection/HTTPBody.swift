@@ -15,13 +15,21 @@ public struct HTTPBody: AsyncSequence, Sendable {
 
     public struct AsyncIterator: AsyncIteratorProtocol {
         private let source: BodyIteratorSource
+        private let onCancel: @Sendable () -> Void
 
-        fileprivate init(source: BodyIteratorSource) {
+        fileprivate init(source: BodyIteratorSource, onCancel: @escaping @Sendable () -> Void) {
             self.source = source
+            self.onCancel = onCancel
         }
 
         public mutating func next() async throws -> Data? {
-            try await source.next()
+            let source = source
+            let onCancel = onCancel
+            return try await withTaskCancellationHandler {
+                try await source.next()
+            } onCancel: {
+                onCancel()
+            }
         }
     }
 
@@ -32,6 +40,7 @@ public struct HTTPBody: AsyncSequence, Sendable {
 
     private let factory: @Sendable () -> BodyIteratorSource
     private let lifetime: StreamLifetime?
+    private let onCancel: @Sendable () -> Void
 
     init(
         length: Int64?,
@@ -42,17 +51,29 @@ public struct HTTPBody: AsyncSequence, Sendable {
         self.length = length
         self.isReplayable = isReplayable
         self.lifetime = lifetime
+        self.onCancel = { lifetime?.cancel() }
         self.factory = factory
     }
 
     public func makeAsyncIterator() -> AsyncIterator {
-        AsyncIterator(source: factory())
+        AsyncIterator(source: factory(), onCancel: onCancel)
     }
 
     /// Collects every chunk. Prefer iterating when the body may be large.
     public func collect() async throws -> Data {
+        try await collect(upTo: Int.max)
+    }
+
+    /// Collects at most `limit` bytes.
+    public func collect(upTo limit: Int) async throws -> Data {
+        guard limit >= 0 else {
+            throw HTTPConnectionError.invalidRequest
+        }
         var data = Data()
         for try await chunk in self {
+            guard chunk.count <= limit - data.count else {
+                throw HTTPConnectionError.responseTooLarge
+            }
             data.append(chunk)
         }
         return data

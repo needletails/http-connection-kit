@@ -24,27 +24,34 @@ actor InboundMailbox<Part: Sendable> {
     private var queued: [Part] = []
     private var consumer: CheckedContinuation<Part?, Error>?
     private var producer: CheckedContinuation<Void, Never>?
+    private var timeoutTask: Task<Void, Never>?
     private var finished = false
     private var failure: Error?
     private var generation = 0
 
     func yield(_ part: Part) async {
-        if finished {
+        if finished || failure != nil {
             return
         }
         if let consumer {
+            cancelTimeout()
             generation += 1
             self.consumer = nil
             consumer.resume(returning: part)
             return
         }
         queued.append(part)
-        if queued.count >= 1 {
-            await withCheckedContinuation { producer = $0 }
+        await withCheckedContinuation { continuation in
+            if finished || failure != nil {
+                continuation.resume()
+                return
+            }
+            producer = continuation
         }
     }
 
     func finish() {
+        cancelTimeout()
         finished = true
         generation += 1
         consumer?.resume(returning: nil)
@@ -54,7 +61,10 @@ actor InboundMailbox<Part: Sendable> {
     }
 
     func fail(_ error: Error) {
-        failure = error
+        cancelTimeout()
+        if failure == nil {
+            failure = error
+        }
         generation += 1
         consumer?.resume(throwing: error)
         consumer = nil
@@ -77,21 +87,48 @@ actor InboundMailbox<Part: Sendable> {
         }
         generation += 1
         let captured = generation
-        return try await withCheckedThrowingContinuation { continuation in
-            consumer = continuation
-            if let timeoutNanoseconds {
-                Task {
-                    try? await Task.sleep(nanoseconds: max(timeoutNanoseconds, 1))
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                consumer = continuation
+                guard let timeoutNanoseconds else {
+                    return
+                }
+                timeoutTask = Task {
+                    do {
+                        try await Task.sleep(nanoseconds: max(timeoutNanoseconds, 1))
+                    } catch {
+                        return
+                    }
                     self.expire(generation: captured)
                 }
             }
+        } onCancel: {
+            Task { await self.cancelWait(generation: captured) }
         }
     }
 
+    private func cancelTimeout() {
+        timeoutTask?.cancel()
+        timeoutTask = nil
+    }
+
+    private func cancelWait(generation captured: Int) {
+        guard generation == captured, consumer != nil else {
+            return
+        }
+        fail(CancellationError())
+    }
+
     private func expire(generation captured: Int) {
+        timeoutTask = nil
         guard self.generation == captured, let consumer else {
             return
         }
+        generation += 1
         self.consumer = nil
         consumer.resume(returning: nil)
     }
@@ -190,7 +227,8 @@ extension HTTPConnection {
         inboundNext: () async throws -> HTTPClientResponsePart?,
         firstHead: HTTPResponseHead?,
         progress: (@Sendable (HTTPProgress) -> Void)?,
-        expected: Int64?
+        expected: Int64?,
+        maximumBodySize: Int
     ) async throws -> Response {
         var responseHead = firstHead
         var payload = ByteBuffer()
@@ -205,6 +243,9 @@ extension HTTPConnection {
             case .body(var buffer):
                 guard responseHead != nil else { continue }
                 let count = buffer.readableBytes
+                guard count <= maximumBodySize - payload.readableBytes else {
+                    throw HTTPConnectionError.responseTooLarge
+                }
                 payload.writeBuffer(&buffer)
                 completed += Int64(count)
                 progress?(HTTPProgress(direction: .download, completed: completed, expected: expected ?? contentLength(responseHead)))
@@ -218,7 +259,8 @@ extension HTTPConnection {
 
     static func collectHTTP3(
         inbound: NIOAsyncChannelInboundStream<HTTPResponsePart>,
-        progress: (@Sendable (HTTPProgress) -> Void)?
+        progress: (@Sendable (HTTPProgress) -> Void)?,
+        maximumBodySize: Int
     ) async throws -> Response {
         var responseHead: HTTPResponse?
         var payload = ByteBuffer()
@@ -233,6 +275,9 @@ extension HTTPConnection {
             case .body(var buffer):
                 guard responseHead != nil else { continue }
                 let count = buffer.readableBytes
+                guard count <= maximumBodySize - payload.readableBytes else {
+                    throw HTTPConnectionError.responseTooLarge
+                }
                 payload.writeBuffer(&buffer)
                 completed += Int64(count)
                 progress?(HTTPProgress(

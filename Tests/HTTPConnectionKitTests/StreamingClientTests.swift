@@ -108,6 +108,45 @@ struct StreamingClientTests {
     }
 
     @Test(arguments: TestHTTP.allCases)
+    func cancellingAPausedDownloadStopsTheRead(_ version: TestHTTP) async throws {
+        try await withLocalClient(version) { client, url, _, _ in
+            let streamed = try await client.requestStream(method: .get, url: url("/drip"))
+            let sawFirst = HoldGate()
+            let read = Task {
+                var iterator = streamed.body.makeAsyncIterator()
+                _ = try await iterator.next()
+                await sawFirst.signal()
+                return try await iterator.next()
+            }
+            await sawFirst.wait()
+            read.cancel()
+            #expect(await waitForTask(read, seconds: 2))
+        }
+    }
+
+    @Test func cancellingExpectContinueDoesNotSendTheBody() async throws {
+        var configuration = HTTPConnection.Configuration()
+        configuration.expectContinueTimeout = .seconds(30)
+        try await withHTTP1Client(configuration: configuration) { client, server in
+            let pulled = PullFlag()
+            let body = HTTPBody.oneShot {
+                pulled.mark()
+                return Data("secret".utf8)
+            }
+            var headers = HTTPFields()
+            headers[HTTPField.Name("expect")!] = "100-continue"
+            let url = server.url("/expect-silent")
+            let request = Task {
+                try await client.request(method: .post, url: url, headers: headers, body: body)
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+            request.cancel()
+            #expect(await waitForTask(request, seconds: 2))
+            #expect(!pulled.value)
+        }
+    }
+
+    @Test(arguments: TestHTTP.allCases)
     func endingAStreamEarlyLetsTheNextRequestSucceed(_ version: TestHTTP) async throws {
         try await withLocalClient(version) { client, url, gates, _ in
             do {

@@ -10,8 +10,63 @@ import NIOHTTP1
 import NIOHTTPTypes
 import NIOHTTPCompression
 
+private struct AuthenticationOrigin: Equatable {
+    var scheme: String?
+    var host: String?
+    var port: Int?
+
+    init(_ url: URL) {
+        scheme = url.scheme?.lowercased()
+        host = url.host?.lowercased()
+        if let port = url.port {
+            self.port = port
+        } else {
+            self.port = scheme == "https" ? 443 : scheme == "http" ? 80 : nil
+        }
+    }
+}
+
 extension HTTPConnection {
     func requestPrepared(
+        method: HTTPRequest.Method,
+        url: URL,
+        headers: HTTPFields,
+        body: HTTPBody?,
+        collect: Bool
+    ) async throws -> RequestResult {
+        guard let timeout = configuration.requestTimeout else {
+            return try await requestPreparedWithoutTimeout(
+                method: method,
+                url: url,
+                headers: headers,
+                body: body,
+                collect: collect
+            )
+        }
+        return try await withThrowingTaskGroup(of: RequestResult.self) { group in
+            group.addTask {
+                try await self.requestPreparedWithoutTimeout(
+                    method: method,
+                    url: url,
+                    headers: headers,
+                    body: body,
+                    collect: collect
+                )
+            }
+            group.addTask {
+                let nanoseconds = UInt64(max(timeout.nanoseconds, 0))
+                try await Task.sleep(nanoseconds: nanoseconds)
+                throw HTTPConnectionError.timeout
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else {
+                throw HTTPConnectionError.invalidRequest
+            }
+            return first
+        }
+    }
+
+    private func requestPreparedWithoutTimeout(
         method: HTTPRequest.Method,
         url: URL,
         headers: HTTPFields,
@@ -26,9 +81,11 @@ extension HTTPConnection {
         var headers = headers
         var body = body
         var redirectCount = 0
-        var authRetries = 0
+        var challengeRetries = 0
+        var authenticationRetried = false
         var digestNonceCount = 1
         var previousSite: String?
+        let authenticationOrigin = AuthenticationOrigin(url)
 
         while true {
             let components = try requestComponents(from: url)
@@ -38,6 +95,25 @@ extension HTTPConnection {
                 method: method,
                 previousSite: previousSite
             )
+            if let authenticationSession {
+                let sameOrigin = AuthenticationOrigin(url) == authenticationOrigin
+                let allowed = sameOrigin
+                    ? await authenticationSession.applies(to: url)
+                    : await authenticationSession.allowsRedirect(to: url)
+                if allowed {
+                var request = HTTPAuthenticationRequest(method: method, url: url, headers: headers)
+                do {
+                    request = try await authenticationSession.prepare(request)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch let error as HTTPConnectionError {
+                    throw error
+                } catch {
+                    throw HTTPConnectionError.authenticationFailed(error)
+                }
+                headers = request.headers
+                }
+            }
             previousSite = CookieJar.registrableDomain(
                 host: url.host?.lowercased() ?? "",
                 list: BundledPublicSuffixList()
@@ -55,13 +131,23 @@ extension HTTPConnection {
             case .collected(let response):
                 let response = Response(head: stripInflatedEncoding(response.head), body: response.body)
                 await configuration.cookieJar.store(response: response.head.headerFields, from: url)
-                if try await applyAuthenticationIfNeeded(
+                if try await applyProviderAuthenticationIfNeeded(
+                    response: response,
+                    method: method,
+                    url: url,
+                    headers: &headers,
+                    body: body,
+                    alreadyRetried: &authenticationRetried
+                ) {
+                    continue
+                }
+                if try await applyChallengeAuthenticationIfNeeded(
                     response: response,
                     method: &method,
                     url: url,
                     headers: &headers,
                     body: body,
-                    authRetries: &authRetries,
+                    challengeRetries: &challengeRetries,
                     digestNonceCount: &digestNonceCount
                 ) {
                     continue
@@ -81,20 +167,33 @@ extension HTTPConnection {
             case .streaming(var streamed):
                 streamed.head = stripInflatedEncoding(streamed.head)
                 await configuration.cookieJar.store(response: streamed.head.headerFields, from: url)
-                if configuration.followRedirects, isRedirect(streamed.head.status.code) {
+                let status = streamed.head.status.code
+                let hasAuthenticationHandler = status == 401 && authenticationSession != nil
+                    || status == 407 && proxyAuthenticationSession != nil
+                if hasAuthenticationHandler || shouldFollow(status: status) {
                     let collected = try await collectStream(streamed)
-                    if try await applyAuthenticationIfNeeded(
+                    if try await applyProviderAuthenticationIfNeeded(
+                        response: collected,
+                        method: method,
+                        url: url,
+                        headers: &headers,
+                        body: body,
+                        alreadyRetried: &authenticationRetried
+                    ) {
+                        continue
+                    }
+                    if try await applyChallengeAuthenticationIfNeeded(
                         response: collected,
                         method: &method,
                         url: url,
                         headers: &headers,
                         body: body,
-                        authRetries: &authRetries,
+                        challengeRetries: &challengeRetries,
                         digestNonceCount: &digestNonceCount
                     ) {
                         continue
                     }
-                    if let next = try redirectTarget(
+                    if shouldFollow(status: status), let next = try redirectTarget(
                         response: collected,
                         current: url,
                         method: &method,
@@ -158,33 +257,67 @@ extension HTTPConnection {
         return headers
     }
 
-    private func applyAuthenticationIfNeeded(
+    private func applyProviderAuthenticationIfNeeded(
+        response: Response,
+        method: HTTPRequest.Method,
+        url: URL,
+        headers: inout HTTPFields,
+        body: HTTPBody?,
+        alreadyRetried: inout Bool
+    ) async throws -> Bool {
+        guard !alreadyRetried, response.head.status.code == 401, let authenticationSession else {
+            return false
+        }
+        let request = HTTPAuthenticationRequest(method: method, url: url, headers: headers)
+        let retry: HTTPAuthenticationRequest?
+        do {
+            retry = try await authenticationSession.retry(request, after: HTTPAuthenticationResponse(response))
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as HTTPConnectionError {
+            throw error
+        } catch {
+            throw HTTPConnectionError.authenticationFailed(error)
+        }
+        guard let retry else {
+            return false
+        }
+        if body.map(\.isReplayable) == false {
+            throw HTTPConnectionError.unreplayableBody
+        }
+        headers = retry.headers
+        alreadyRetried = true
+        return true
+    }
+
+    private func applyChallengeAuthenticationIfNeeded(
         response: Response,
         method: inout HTTPRequest.Method,
         url: URL,
         headers: inout HTTPFields,
         body: HTTPBody?,
-        authRetries: inout Int,
+        challengeRetries: inout Int,
         digestNonceCount: inout Int
     ) async throws -> Bool {
         let status = response.head.status.code
         guard status == 401 || status == 407 else {
             return false
         }
-        guard let authenticator = configuration.authenticator else {
+        let session = status == 407 ? proxyAuthenticationSession : authenticationSession
+        guard let session else {
             return false
         }
         let challenges = response.challenges
-        guard let credentials = await authenticator(challenges, url) else {
+        guard !challenges.isEmpty else {
             return false
         }
         let digestStale = challenges.contains {
             $0.scheme.lowercased() == "digest" && $0.parameters["stale"]?.lowercased() == "true"
         }
-        if authRetries >= 2 {
+        if challengeRetries >= 2 || (challengeRetries >= 1 && !digestStale) {
             return false
         }
-        if authRetries >= 1 && !digestStale {
+        guard let credentials = await session.credentials(for: challenges, url: url) else {
             return false
         }
         guard let challenge = preferredChallenge(challenges, credentials: credentials) else {
@@ -195,7 +328,7 @@ extension HTTPConnection {
         }
         let replayedBody: Data?
         if challenge.scheme.lowercased() == "digest", challenge.parameters["qop"]?.contains("auth-int") == true {
-            replayedBody = try await body?.collect()
+            replayedBody = try await body?.collect(upTo: configuration.maximumBufferedBodySize)
         } else {
             replayedBody = nil
         }
@@ -211,7 +344,7 @@ extension HTTPConnection {
         }
         let name: HTTPField.Name = status == 407 ? .proxyAuthorization : header.name
         headers[name] = header.value
-        authRetries += 1
+        challengeRetries += 1
         digestNonceCount += 1
         return true
     }
@@ -260,12 +393,16 @@ extension HTTPConnection {
         case 301, 302, 303:
             method = method == .head ? .head : .get
             body = nil
+            headers[.contentLength] = nil
+            headers[.contentType] = nil
+            headers[.contentEncoding] = nil
+            headers[.transferEncoding] = nil
         default:
             if body.map(\.isReplayable) == false {
                 throw HTTPConnectionError.unreplayableBody
             }
         }
-        if next.host?.lowercased() != current.host?.lowercased() {
+        if AuthenticationOrigin(next) != AuthenticationOrigin(current) {
             headers[.authorization] = nil
             headers[.proxyAuthorization] = nil
         }
@@ -283,7 +420,7 @@ extension HTTPConnection {
     }
 
     private func collectStream(_ streamed: StreamingResponse) async throws -> Response {
-        let body = try await streamed.body.collect()
+        let body = try await streamed.body.collect(upTo: configuration.maximumBufferedBodySize)
         var head = streamed.head
         let trailers = await streamed.trailers()
         head.headerFields.append(contentsOf: trailers)
@@ -433,7 +570,8 @@ extension HTTPConnection {
                         inboundNext: { try await mailbox.next() },
                         firstHead: peeked,
                         progress: context.onProgress,
-                        expected: peeked.map { Int64($0.headers["content-length"].first.flatMap(Int64.init) ?? 0) }
+                        expected: peeked.map { Int64($0.headers["content-length"].first.flatMap(Int64.init) ?? 0) },
+                        maximumBodySize: max(configuration.maximumBufferedBodySize, 0)
                     )
                     return RequestResult.collected(response)
                 }
@@ -522,7 +660,11 @@ extension HTTPConnection {
             do {
                 return try await request.executeThenClose { inbound, outbound in
                     try await Self.writeHTTP3Request(context, outbound: outbound)
-                    let response = try await Self.collectHTTP3(inbound: inbound, progress: context.onProgress)
+                    let response = try await Self.collectHTTP3(
+                        inbound: inbound,
+                        progress: context.onProgress,
+                        maximumBodySize: max(configuration.maximumBufferedBodySize, 0)
+                    )
                     return RequestResult.collected(try self.inflateIfNeeded(response))
                 }
             } catch {
@@ -633,6 +775,9 @@ extension HTTPConnection {
         )
         var data = try inflater.push(response.body ?? Data())
         data.append(try inflater.finish())
+        guard data.count <= max(configuration.maximumBufferedBodySize, 0) else {
+            throw HTTPConnectionError.responseTooLarge
+        }
         var head = response.head
         head.headerFields[.contentEncoding] = nil
         head.headerFields[.contentLength] = String(data.count)
@@ -641,7 +786,8 @@ extension HTTPConnection {
 
     public func resumeDownload(from url: URL, to fileURL: URL) async throws -> Response {
         let sidecar = URL(fileURLWithPath: fileURL.path + ".http-range")
-        let existing = (try? Data(contentsOf: fileURL).count) ?? 0
+        let attributes = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let existing = (attributes?[.size] as? NSNumber)?.intValue ?? 0
         var headers = HTTPFields()
         if existing > 0 {
             headers[.range] = "bytes=\(existing)-"
@@ -692,24 +838,31 @@ func pumpHTTP1(
     context: ExchangeContext,
     mailbox: InboundMailbox<HTTPClientResponsePart>
 ) async {
-    do {
-        try await box.request.executeThenClose { inbound, outbound in
-            let reader = Task {
-                do {
-                    for try await part in inbound {
-                        await mailbox.yield(part)
+    await withTaskCancellationHandler {
+        do {
+            try await box.request.executeThenClose { inbound, outbound in
+                let reader = Task {
+                    do {
+                        for try await part in inbound {
+                            await mailbox.yield(part)
+                        }
+                        await mailbox.finish()
+                    } catch {
+                        await mailbox.fail(HTTPConnection.mapDecompression(error))
                     }
-                    await mailbox.finish()
-                } catch {
-                    await mailbox.fail(HTTPConnection.mapDecompression(error))
                 }
+                defer { reader.cancel() }
+                _ = try await HTTPConnection.writeOpeningHTTP1(context, outbound: outbound, mailbox: mailbox)
+                await reader.value
             }
-            defer { reader.cancel() }
-            _ = try await HTTPConnection.writeOpeningHTTP1(context, outbound: outbound, mailbox: mailbox)
-            await reader.value
+        } catch {
+            await mailbox.fail(HTTPConnection.mapDecompression(error))
         }
-    } catch {
-        await mailbox.fail(HTTPConnection.mapDecompression(error))
+    } onCancel: {
+        // Closing the request channel ends the inbound stream, which is the only way the reader
+        // task above can finish while the server is still sending.
+        box.request.channel.close(promise: nil)
+        Task { await mailbox.fail(CancellationError()) }
     }
 }
 
@@ -720,26 +873,31 @@ func pumpHTTP3(
     mailbox: InboundMailbox<HTTPResponsePart>,
     writesRequest: Bool = true
 ) async {
-    do {
-        try await box.request.executeThenClose { inbound, outbound in
-            if writesRequest {
-                try await HTTPConnection.writeHTTP3Request(context, outbound: outbound)
-            }
-            do {
-                for try await part in inbound {
-                    await mailbox.yield(part)
+    await withTaskCancellationHandler {
+        do {
+            try await box.request.executeThenClose { inbound, outbound in
+                if writesRequest {
+                    try await HTTPConnection.writeHTTP3Request(context, outbound: outbound)
                 }
-                await mailbox.finish()
-            } catch {
-                await mailbox.fail(HTTPConnection.mapDecompression(error))
+                do {
+                    for try await part in inbound {
+                        await mailbox.yield(part)
+                    }
+                    await mailbox.finish()
+                } catch {
+                    await mailbox.fail(HTTPConnection.mapDecompression(error))
+                }
             }
+        } catch {
+            await mailbox.fail(HTTPConnection.mapDecompression(error))
         }
-    } catch {
-        await mailbox.fail(HTTPConnection.mapDecompression(error))
+    } onCancel: {
+        box.request.channel.close(promise: nil)
+        Task { await mailbox.fail(CancellationError()) }
     }
 }
 
-enum RequestResult {
+enum RequestResult: Sendable {
     case collected(Response)
     case streaming(StreamingResponse)
 }

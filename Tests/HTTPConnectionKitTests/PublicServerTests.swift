@@ -12,8 +12,8 @@ import Testing
 
 /// Requests against hosts on the public internet.
 ///
-/// The test fails with a clear message when that host's TCP port is closed. HTTP/3 records a warning
-/// and still passes when the handshake falls back to TCP; the local QUIC server covers that path.
+/// The test fails with a clear message when that host's TCP port is closed. The trace request records
+/// a warning and still passes when QUIC falls back to TCP. `cloudflare-quic.com` must answer over HTTP/3.
 @Suite("Public HTTPS servers")
 struct PublicServerTests {
     @Test func exampleDomainOverTLS13() async throws {
@@ -50,6 +50,24 @@ struct PublicServerTests {
             Issue.record("QUIC did not connect; the client used TCP", severity: .warning)
         }
         #expect(http == "http/3" || http == "http/2")
+    }
+
+    @Test func cloudflareQUICPageArrivesOverHTTP3() async throws {
+        try await requireTCP(host: "cloudflare-quic.com")
+        var configuration = HTTPConnection.Configuration()
+        configuration.tls.minimumVersion = .tlsv13
+        configuration.channel.quicIdleTimeout = .seconds(8)
+        try await withClient(preferred: .http3, configuration: configuration) { client in
+            let response = try await client.request(
+                method: .get,
+                url: URL(string: "https://cloudflare-quic.com/")!,
+                headers: [:],
+                body: nil
+            )
+            #expect(response.head.status.code == 200)
+            let page = String(decoding: try #require(response.body), as: UTF8.self)
+            #expect(page.contains("your browser used <strong>HTTP/3</strong>"))
+        }
     }
 
     private func cloudflareTrace(

@@ -3,7 +3,7 @@
 [![Swift](https://img.shields.io/badge/Swift-6.4-orange.svg)](https://swift.org)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-blue.svg)](https://swift.org)
 
-An HTTP client for HTTP/1, HTTP/2, and HTTP/3. `HTTPConnection` is an actor. Create one instance for a TLS policy, send requests on it, and call `shutdown()` when it is finished.
+An HTTP client for HTTP/1, HTTP/2, and HTTP/3. `HTTPConnection` is an actor. Create one instance for a TLS policy and reuse it across requests. `shutdown()` waits for deterministic cleanup; dropping the client also closes its pooled connections as a best-effort safety net.
 
 The preferred version is a cap. The client offers every protocol at or below that cap and uses the one the handshake selects. A `505` response is the server's answer and does not cause another attempt on a lower protocol.
 
@@ -39,12 +39,8 @@ targets: [
 import HTTPConnectionKit
 
 let client = HTTPConnection(preferred: .http3)
-let response = try await client.request(
-    method: .get,
-    url: URL(string: "https://example.com/")!,
-    headers: [:],
-    body: nil
-)
+let url = URL(string: "https://example.com/")!
+let response = try await client.request(method: .get, url: url)
 print(response.head.status.code)
 await client.shutdown()
 ```
@@ -62,7 +58,13 @@ let client = HTTPConnection(preferred: .http2, configuration: configuration)
 
 Timeouts are `HTTPConnection.Configuration.Interval` values, in nanoseconds. Certificate checking is `.fullVerification`, `.noHostnameVerification`, or `.none`.
 
-Policies live on `Configuration`, not on each request. Defaults follow redirects (limit 8), decompress `gzip` and `deflate`, keep an empty `CookieJar`, and set no authenticator and no progress callback.
+Policies live on `Configuration`, not on each request. Defaults follow redirects (limit 8), decompress `gzip` and `deflate`, keep an empty `CookieJar`, and set no authentication provider and no progress callback.
+
+## Limits and safety
+
+Buffered responses are limited to 64 MiB and a request has a 60-second deadline by default. Configure `maximumBufferedBodySize` and `requestTimeout`; set the deadline to `nil` only when the caller supplies its own cancellation. `requestStream` does not buffer the response body, and `HTTPBody.collect(upTo:)` gives streaming callers an explicit bound.
+
+Credentials are scoped to the original scheme, host, and port across redirects. Bearer tokens are sent only over HTTPS unless `BearerTokenProvider.appliesTo` explicitly permits another URL. Authentication values and credential descriptions redact secrets. `Authorization` and body headers are removed when a redirect changes their security or request semantics.
 
 ## Bodies, forms, and streams
 
@@ -93,7 +95,7 @@ A form or file with a known byte count sets `Content-Length`. An unknown stream 
 
 ## Redirects, compression, continue, and range
 
-`301`, `302`, and `303` become `GET` and drop the body. `307` and `308` repeat the method when the body is replayable. A one-shot body fails with `HTTPConnectionError.unreplayableBody`. `Authorization` is removed when the host changes. The `Cookie` header is built again for the new URL.
+`301`, `302`, and `303` become `GET` and drop the body and its representation headers. `307` and `308` repeat the method when the body is replayable. A one-shot body fails with `HTTPConnectionError.unreplayableBody`. Authorization is removed when the scheme, host, or port changes. The `Cookie` header is built again for the new URL.
 
 The client sends `Accept-Encoding: deflate, gzip` unless the request already has that field. Inflated `gzip` and `deflate` bodies are what the caller sees, including streamed chunks. Brotli stays compressed. A ratio bomb fails with `HTTPConnectionError.decompressionLimit`.
 
@@ -105,9 +107,28 @@ If the request sets `Expect: 100-continue`, the client writes the head and waits
 
 `configuration.onProgress` receives `HTTPProgress` after each upload or download chunk, with an expected total when `Content-Length` or `Content-Range` provides one.
 
-Every `401` and `407` exposes `HTTPChallenge` values. An optional authenticator retries once with Basic, Bearer, or Digest (RFC 7616, SHA-256 preferred). `qop=auth` is the default. A Digest `stale=true` reply allows one further retry. `407` sets `Proxy-Authorization`.
+Install a `BearerTokenProvider` to apply an access token before the first request and renew it once when the server returns `401`. Concurrent failures share one refresh. A second rejection is returned as a response.
 
-`CookieJar` stores `Set-Cookie` using RFC 6265 domain, path, `Secure`, expiry, `SameSite`, prefix, and size rules. Two clients can share one jar. `PublicSuffixList` is replaceable; the package ships a snapshot.
+```swift
+var configuration = HTTPConnection.Configuration()
+configuration.authentication = BearerTokenProvider(
+    load: {
+        guard let token = await tokenStore.current else { return nil }
+        return BearerToken(token.value, expiresAt: token.expiresAt)
+    },
+    refresh: { old in
+        let token = try await tokenStore.refresh(old.value)
+        return BearerToken(token.value, expiresAt: token.expiresAt)
+    }
+)
+let client = HTTPConnection(configuration: configuration)
+```
+
+Expiry renews the token before a request. A bare `401` and a Bearer `invalid_token` challenge renew after the response. Bearer `insufficient_scope` is returned unchanged. `authenticationRefreshWindow` defaults to five refreshes in 30 seconds and stops a refresh storm with `HTTPConnectionError.authenticationRefreshLimitExceeded`.
+
+Implement `HTTPAuthenticationProvider` for another credential type or to answer Basic and Digest challenges. Every `401` and `407` still exposes `HTTPChallenge` values. `proxyAuthentication` handles `407` separately and writes `Proxy-Authorization`. Digest prefers SHA-256, uses `qop=auth` by default, and permits one additional attempt for `stale=true`. Without a provider, authentication responses are returned unchanged.
+
+`CookieJar` stores `Set-Cookie` using RFC 6265 domain, path, `Secure`, expiry, `SameSite`, prefix, and size rules. Two clients can share one jar. `PublicSuffixList` is replaceable; the package ships a conservative snapshot of common ICANN and hosted suffixes, not a live browser PSL.
 
 ## Protocol selection
 

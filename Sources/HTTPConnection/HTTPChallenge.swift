@@ -90,8 +90,8 @@ public struct HTTPChallenge: Sendable, Equatable {
     }
 }
 
-/// Credentials returned by an authenticator.
-public struct HTTPCredentials: Sendable {
+/// Basic, Bearer, or Digest credentials returned by an authentication provider for a challenge.
+public struct HTTPCredentials: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     public var username: String?
     public var password: String?
     public var bearerToken: String?
@@ -113,10 +113,13 @@ public struct HTTPCredentials: Sendable {
     public static func digest(username: String, password: String) -> Self {
         Self(username: username, password: password)
     }
-}
 
-/// Chooses credentials for a challenge. Returning `nil` leaves the response as-is.
-public typealias HTTPAuthenticator = @Sendable ([HTTPChallenge], URL) async -> HTTPCredentials?
+    public var description: String {
+        "HTTPCredentials(username: \(username ?? "nil"), password: \(password == nil ? "nil" : "<redacted>"), bearerToken: \(bearerToken == nil ? "nil" : "<redacted>"))"
+    }
+
+    public var debugDescription: String { description }
+}
 
 enum ChallengeAuthorization {
     static func header(

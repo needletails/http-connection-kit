@@ -52,8 +52,12 @@ final class StreamLifetime: @unchecked Sendable {
         self.task = task
     }
 
-    deinit {
+    func cancel() {
         task.cancel()
+    }
+
+    deinit {
+        cancel()
     }
 }
 

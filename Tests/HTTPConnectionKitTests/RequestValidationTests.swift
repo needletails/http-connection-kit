@@ -30,10 +30,44 @@ struct RequestValidationTests {
         #expect(configuration.decompressResponses)
         #expect(configuration.decompressionRatioLimit == 100)
         #expect(configuration.expectContinueTimeout.nanoseconds == 1_000_000_000)
-        #expect(configuration.authenticator == nil)
+        #expect(configuration.authentication == nil)
+        #expect(configuration.proxyAuthentication == nil)
+        #expect(configuration.authenticationRefreshWindow.maximumAttempts == 5)
+        #expect(configuration.maximumBufferedBodySize == 64 * 1024 * 1024)
+        #expect(configuration.requestTimeout?.nanoseconds == 60_000_000_000)
         #expect(configuration.onProgress == nil)
         #expect(HTTPConnection.Configuration.Interval.seconds(2).nanoseconds == 2_000_000_000)
         #expect(HTTPConnection.Configuration.Interval.milliseconds(5).nanoseconds == 5_000_000)
+    }
+
+    @Test func requestDefaultsNeedOnlyAMethodAndURL() async throws {
+        try await withHTTP1Client { client, server in
+            let response = try await client.request(method: .get, url: server.url("/echo"))
+            #expect(response.head.status.code == 200)
+        }
+    }
+
+    @Test func anHTTPRequestRoundTrips() async throws {
+        try await withHTTP1Client { client, server in
+            let url = server.url("/echo")
+            let request = HTTPRequest(
+                method: .get,
+                scheme: "http",
+                authority: "\(url.host!):\(url.port!)",
+                path: "/echo"
+            )
+            let response = try await client.request(request)
+            #expect(response.head.status.code == 200)
+        }
+    }
+
+    @Test func anHTTPRequestRequiresAnAuthority() async {
+        let client = HTTPConnection(preferred: .http1_1)
+        let request = HTTPRequest(method: .get, scheme: "http", authority: nil, path: "/")
+        await #expect(throws: HTTPConnectionError.invalidRequest) {
+            try await client.request(request)
+        }
+        await client.shutdown()
     }
 
     @Test func connectIsRejectedBeforeAConnectionOpens() async {

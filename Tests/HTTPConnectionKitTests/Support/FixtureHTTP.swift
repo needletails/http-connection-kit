@@ -168,6 +168,9 @@ func fixturePlan(
     } else if path == "/gzip-bomb" {
         responseHeaders.append(("content-encoding", "gzip"))
         payload = ByteBuffer(bytes: FixtureCompressed.gzipBomb)
+    } else if path == "/large" {
+        let count = Int(fixtureQuery(uri, name: "bytes") ?? "") ?? 0
+        payload = ByteBuffer(repeating: 0x61, count: max(count, 0))
     } else if path == "/range" || path == "/bytes" {
         let resource = "0123456789"
         responseHeaders.append(("etag", "\"r1\""))
@@ -184,7 +187,7 @@ func fixturePlan(
         } else {
             payload = ByteBuffer(string: resource)
         }
-    } else if let auth = fixtureAuth(path: path, headerMap: headerMap) {
+    } else if let auth = fixtureAuth(path: path, headerMap: headerMap, body: body) {
         status = auth.status
         responseHeaders.append(contentsOf: auth.headers)
         payload = ByteBuffer(string: auth.body)
@@ -357,7 +360,8 @@ private func fixtureRangeStart(_ header: String) -> Int? {
 
 private func fixtureAuth(
     path: String,
-    headerMap: [String: String]
+    headerMap: [String: String],
+    body: ByteBuffer
 ) -> (status: Int, headers: [(String, String)], body: String)? {
     switch path {
     case "/auth/basic":
@@ -403,6 +407,22 @@ private func fixtureAuth(
             return (200, [], "ok")
         }
         return (407, [("proxy-authenticate", "Basic realm=\"proxy\"")], "denied")
+    case "/auth/refresh":
+        if let authorization = headerMap["authorization"], authorization == "Bearer fresh" {
+            let posted = String(decoding: body.readableBytesView, as: UTF8.self)
+            return (200, [], "\(authorization)\n\(posted)")
+        }
+        return (401, [], "expired")
+    case "/auth/refresh-rejected":
+        return (401, [], "expired")
+    case "/auth/refresh-large":
+        return (401, [], String(repeating: "x", count: 1024))
+    case "/auth/bearer-scope":
+        return (
+            401,
+            [("www-authenticate", "Bearer realm=\"api\", error=\"insufficient_scope\"")],
+            "scope"
+        )
     default:
         return nil
     }

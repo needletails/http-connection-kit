@@ -56,4 +56,31 @@ public enum HTTPConnectionError: Error, Equatable, Sendable {
     case decompressionLimit
     /// The redirect limit was exhausted.
     case tooManyRedirects
+    /// A buffered response exceeded `maximumBufferedBodySize`.
+    case responseTooLarge
+    /// The configured request deadline elapsed.
+    case timeout
+    /// The authentication refresh window rejected another refresh.
+    case authenticationRefreshLimitExceeded
+    /// An authentication provider could not renew its credential.
+    case authenticationFailed(any Error)
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        switch (lhs, rhs) {
+        case (.unimplemented, .unimplemented),
+             (.invalidRequest, .invalidRequest),
+             (.invalidMultipart, .invalidMultipart),
+             (.bodyAlreadyConsumed, .bodyAlreadyConsumed),
+             (.unreplayableBody, .unreplayableBody),
+             (.decompressionLimit, .decompressionLimit),
+             (.tooManyRedirects, .tooManyRedirects),
+             (.responseTooLarge, .responseTooLarge),
+             (.timeout, .timeout),
+             (.authenticationRefreshLimitExceeded, .authenticationRefreshLimitExceeded),
+             (.authenticationFailed, .authenticationFailed):
+            true
+        default:
+            false
+        }
+    }
 }

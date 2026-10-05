@@ -5,6 +5,7 @@
 
 import Foundation
 import HTTPTypes
+import NIOCore
 
 /// Answers whether a domain is a public suffix.
 public protocol PublicSuffixList: Sendable {
@@ -27,10 +28,12 @@ public struct BundledPublicSuffixList: PublicSuffixList {
 
     private static let defaults: Set<String> = [
         "com", "org", "net", "edu", "gov", "mil", "int", "io", "app", "dev",
-        "co", "uk", "co.uk", "org.uk", "ac.uk", "gov.uk",
-        "au", "com.au", "net.au", "org.au",
+        "co", "uk", "co.uk", "org.uk", "ac.uk", "gov.uk", "net.uk", "ltd.uk", "plc.uk", "me.uk",
+        "au", "com.au", "net.au", "org.au", "edu.au", "gov.au", "asn.au", "id.au",
         "de", "fr", "jp", "cn", "ru", "br", "in", "it", "nl", "se", "no", "es",
         "ca", "us", "info", "biz", "xyz", "online", "cloud", "ai",
+        "co.jp", "ne.jp", "com.br", "com.cn", "com.mx", "co.kr", "co.in", "com.tr",
+        "co.za", "com.sg", "com.hk", "com.tw", "co.nz", "com.ar", "co.il", "com.pl",
         "github.io", "herokuapp.com",
     ]
 }
@@ -195,7 +198,12 @@ public actor CookieJar {
         let hostOnly: Bool
         let storedDomain: String
         if let domain {
-            guard Self.domainMatches(host: host, domain: domain), !publicSuffixList.contains(domain) else {
+            let hostIsIPAddress = (try? SocketAddress(ipAddress: host, port: 0)) != nil
+            guard !hostIsIPAddress,
+                  domain.split(separator: ".").count >= 2,
+                  Self.domainMatches(host: host, domain: domain),
+                  !publicSuffixList.contains(domain)
+            else {
                 return nil
             }
             hostOnly = false

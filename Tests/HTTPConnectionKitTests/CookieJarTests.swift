@@ -4,7 +4,7 @@
 //
 
 import Foundation
-import HTTPConnectionKit
+@testable import HTTPConnection
 import HTTPTypes
 import Testing
 
@@ -36,6 +36,18 @@ struct CookieJarTests {
         #expect(await jar.cookieHeader(for: URL(string: "http://other.test/")!) == nil)
         await jar.store(setCookie: "bad=1; Domain=co.uk", from: URL(string: "http://www.co.uk/")!)
         #expect(await jar.cookieHeader(for: URL(string: "http://www.co.uk/")!) == nil)
+
+        await jar.store(setCookie: "jp=1; Domain=co.jp", from: URL(string: "http://a.co.jp/")!)
+        #expect(await jar.cookieHeader(for: URL(string: "http://a.co.jp/")!) == nil)
+
+        await jar.store(setCookie: "ip=1; Domain=1.2.3.4", from: URL(string: "http://1.2.3.4/")!)
+        #expect(await jar.cookieHeader(for: URL(string: "http://1.2.3.4/")!) == nil)
+        #expect(
+            CookieJar.registrableDomain(
+                host: "api.foo.co.jp",
+                list: BundledPublicSuffixList()
+            ) == "foo.co.jp"
+        )
     }
 
     @Test func pathMatchingPutsTheLongerPathFirst() async {
