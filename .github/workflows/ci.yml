@@ -1,0 +1,98 @@
+name: HTTPConnectionKit CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: http-connection-kit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (Swift 6.4.0, ${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS 26 keeps the HTTP/3 availability checks live.
+          - name: macOS
+            os: macos-26
+          - name: Linux
+            os: ubuntu-24.04
+    env:
+      SWIFT_CERTIFICATES_ALLOW_SWIFT_CRYPTO_BETA: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev
+
+      - name: Install Swift 6.4.0 (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -O "https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz"
+          tar zxf "swiftly-$(uname -m).tar.gz"
+          ./swiftly init --skip-install --assume-yes --quiet-shell-followup
+          # shellcheck disable=SC1091
+          source "${SWIFTLY_HOME_DIR:-$HOME/.local/share/swiftly}/env.sh"
+          swiftly install --assume-yes --use 6.4.0
+          SWIFT_BIN=$(find "$HOME/.local/share/swiftly/toolchains" -type f -path '*/usr/bin/swift' | head -1)
+          if [ -z "$SWIFT_BIN" ]; then
+            echo "Swift 6.4.0 toolchain was not installed" >&2
+            find "$HOME/.local/share/swiftly" -name swift -type f >&2 || true
+            exit 1
+          fi
+          echo "$(dirname "$SWIFT_BIN")" >> "$GITHUB_PATH"
+
+      - name: Install Swift 6.4.0 (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -O https://download.swift.org/swiftly/darwin/swiftly.pkg
+          installer -pkg swiftly.pkg -target CurrentUserHomeDirectory
+          "$HOME/.swiftly/bin/swiftly" init --skip-install --assume-yes --quiet-shell-followup
+          # shellcheck disable=SC1091
+          source "${SWIFTLY_HOME_DIR:-$HOME/.swiftly}/env.sh"
+          swiftly install --assume-yes --use 6.4.0
+          SWIFT_BIN=$(find "$HOME/.swiftly/toolchains" "$HOME/.local/share/swiftly/toolchains" -type f -path '*/usr/bin/swift' 2>/dev/null | head -1)
+          if [ -z "$SWIFT_BIN" ]; then
+            echo "Swift 6.4.0 toolchain was not installed" >&2
+            find "$HOME/.swiftly" "$HOME/.local/share/swiftly" -name swift -type f >&2 || true
+            exit 1
+          fi
+          echo "$(dirname "$SWIFT_BIN")" >> "$GITHUB_PATH"
+
+      - name: Require Swift 6.4
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(swift --version 2>&1)
+          printf '%s\n' "$VERSION"
+          printf '%s\n' "$VERSION" | head -n 1 | grep -E 'Swift version 6\.4'
+
+      - name: Cache Swift package build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-swift-6.4.0-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-swift-6.4.0-
+
+      - name: Test
+        run: swift test
