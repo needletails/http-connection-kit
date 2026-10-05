@@ -150,16 +150,16 @@ func fixturePlan(
         payload = ByteBuffer(string: "redirect")
     } else if path == "/gzip" {
         responseHeaders.append(("content-encoding", "gzip"))
-        payload = ByteBuffer(data: FixtureCompressed.gzipHello)
+        payload = ByteBuffer(bytes: FixtureCompressed.gzipHello)
     } else if path == "/deflate" {
         responseHeaders.append(("content-encoding", "deflate"))
-        payload = ByteBuffer(data: FixtureCompressed.deflateHello)
+        payload = ByteBuffer(bytes: FixtureCompressed.deflateHello)
     } else if path == "/br" {
         responseHeaders.append(("content-encoding", "br"))
         payload = ByteBuffer(string: "brotli-raw")
     } else if path == "/gzip-bomb" {
         responseHeaders.append(("content-encoding", "gzip"))
-        payload = ByteBuffer(data: FixtureCompressed.gzipBomb)
+        payload = ByteBuffer(bytes: FixtureCompressed.gzipBomb)
     } else if path == "/range" || path == "/bytes" {
         let resource = "0123456789"
         responseHeaders.append(("etag", "\"r1\""))
@@ -406,7 +406,7 @@ func fixtureDripRest() -> ByteBuffer { ByteBuffer(string: "WORLD") }
 func fixtureMultipartPauseParts() -> (first: ByteBuffer, rest: ByteBuffer) {
     let first = Data("--pause-boundary\r\nContent-Disposition: form-data; name=\"one\"\r\n\r\nfirst\r\n--pause-boundary\r\n".utf8)
     let rest = Data("Content-Disposition: form-data; name=\"two\"\r\n\r\nsecond\r\n--pause-boundary--\r\n".utf8)
-    return (ByteBuffer(data: first), ByteBuffer(data: rest))
+    return (ByteBuffer(bytes: first), ByteBuffer(bytes: rest))
 }
 
 /// HTTP/1 and HTTP/2 server handler. Both pipelines deliver `HTTPServerRequestPart`.
