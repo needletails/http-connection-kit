@@ -1,5 +1,5 @@
 {
-  "originHash" : "05b77156ec7d9171cb1b053e81c8a0ab3f98358926342c97423dcc45a39fda4f",
+  "originHash" : "c875cb0d7dd27a19f4380b54f15a52fe2b5f3c08ca8939a3bb6f862a3eeb0462",
   "pins" : [
     {
       "identity" : "swift-algorithms",
@@ -62,6 +62,15 @@
       "state" : {
         "revision" : "a9d1d5ab8951ada40cafff8c8e2b551dfde4f390",
         "version" : "5.0.0"
+      }
+    },
+    {
+      "identity" : "swift-gzip",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/mihai8804858/swift-gzip.git",
+      "state" : {
+        "revision" : "97c502f10283dbd80eda534d164b715c9c973d72",
+        "version" : "1.2.3"
       }
     },
     {

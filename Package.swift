@@ -23,7 +23,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-quic.git", from: "0.4.1"),
         .package(url: "https://github.com/apple/swift-nio-http3.git", from: "0.3.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "5.0.0"),
-        .package(url: "https://github.com/apple/swift-certificates.git", from: "1.19.3")
+        .package(url: "https://github.com/apple/swift-certificates.git", from: "1.19.3"),
+        .package(url: "https://github.com/mihai8804858/swift-gzip.git", from: "1.2.1")
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -38,6 +39,7 @@ let package = Package(
         .target(
             name: "HTTPConnection",
             dependencies: [
+                .product(name: "SwiftGzip", package: "swift-gzip"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -55,9 +57,6 @@ let package = Package(
             ],
             swiftSettings: [
                 .enableUpcomingFeature("ApproachableConcurrency"),
-            ],
-            linkerSettings: [
-                .linkedLibrary("z"),
             ]
         ),
         .testTarget(
