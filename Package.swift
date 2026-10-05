@@ -47,12 +47,17 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "HTTPTypes", package: "swift-http-types"),
                 .product(name: "NIOHTTPTypes", package: "swift-nio-extras"),
+                .product(name: "NIOHTTPCompression", package: "swift-nio-extras"),
                 .product(name: "NIOTransportServices", package: "swift-nio-transport-services"),
                 .product(name: "NIOHTTP3", package: "swift-nio-http3"),
                 .product(name: "NIOQUIC", package: "swift-nio-quic"),
+                .product(name: "Crypto", package: "swift-crypto"),
             ],
             swiftSettings: [
                 .enableUpcomingFeature("ApproachableConcurrency"),
+            ],
+            linkerSettings: [
+                .linkedLibrary("z"),
             ]
         ),
         .testTarget(

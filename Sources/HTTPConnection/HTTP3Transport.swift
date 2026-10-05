@@ -37,6 +37,15 @@ final class ConnectedDatagramEnvelopeAdapter: ChannelDuplexHandler {
 }
 
 @available(anyAppleOS 26, *)
+final class HTTP3RequestBox: @unchecked Sendable {
+    let request: NIOAsyncChannel<HTTPResponsePart, HTTPRequestPart>
+
+    init(_ request: NIOAsyncChannel<HTTPResponsePart, HTTPRequestPart>) {
+        self.request = request
+    }
+}
+
+@available(anyAppleOS 26, *)
 extension HTTPConnection {
     /// Places QUIC on a datagram channel. TLS is performed by QUIC, not by a separate TLS handler.
     static func installQUICHandler(

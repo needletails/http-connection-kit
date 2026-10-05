@@ -33,6 +33,11 @@ public struct Response: Sendable {
         self.head = head
         self.body = body
     }
+
+    /// Challenges from `WWW-Authenticate` and `Proxy-Authenticate`.
+    public var challenges: [HTTPChallenge] {
+        HTTPChallenge.parse(head.headerFields)
+    }
 }
 
 /// Failures produced while preparing or finishing a request.
@@ -41,4 +46,14 @@ public enum HTTPConnectionError: Error, Equatable, Sendable {
     case unimplemented
     /// The URL or the message on the wire could not be used.
     case invalidRequest
+    /// A body or multipart parameter is malformed.
+    case invalidMultipart
+    /// A one-shot body was consumed before a retry could use it.
+    case bodyAlreadyConsumed
+    /// A redirect or authentication retry requires a replayable body.
+    case unreplayableBody
+    /// A compressed response exceeded the configured expansion limit.
+    case decompressionLimit
+    /// The redirect limit was exhausted.
+    case tooManyRedirects
 }
