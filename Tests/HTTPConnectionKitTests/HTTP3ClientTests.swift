@@ -121,7 +121,21 @@ struct HTTP3ClientTests {
         let task = Task {
             try await client.request(method: .get, url: holdURL, headers: [:], body: nil)
         }
-        await server.hold.wait()
+        let hold = server.hold
+        let arrived = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await hold.wait()
+                return true
+            }
+            group.addTask {
+                _ = await task.result
+                return false
+            }
+            let arrived = await group.next() ?? false
+            group.cancelAll()
+            return arrived
+        }
+        #expect(arrived)
         task.cancel()
         #expect(await waitForTask(task, seconds: 5))
         let response = try await client.request(method: .get, url: server.url("/echo"), headers: [:], body: nil)

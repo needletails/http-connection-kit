@@ -259,7 +259,10 @@ extension HTTPConnection {
             .channelOption(.socketOption(.so_reuseaddr), value: reuse)
             .channelOption(.socketOption(.so_rcvbuf), value: udpBuffer)
             .channelOption(.socketOption(.so_sndbuf), value: udpBuffer)
-            .channelOption(.datagramVectorReadMessageCount, value: 8)
+            .channelOption(
+                .recvAllocator,
+                value: FixedSizeRecvByteBufferAllocator(capacity: channelOptions.maximumReceiveLength)
+            )
             .channelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
                     try Self.installQUICHandler(

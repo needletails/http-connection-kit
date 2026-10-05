@@ -30,24 +30,32 @@ final class AcceptCounter: @unchecked Sendable {
 /// Wakes a test once a request has reached a fixture checkpoint.
 actor HoldGate {
     private var signaled = false
-    private var waiter: CheckedContinuation<Void, Never>?
+    private var continuation: AsyncStream<Void>.Continuation?
 
     func signal() {
         signaled = true
-        waiter?.resume()
-        waiter = nil
+        continuation?.yield(())
+        continuation?.finish()
+        continuation = nil
     }
 
     func wait() async {
         if signaled {
             return
         }
-        await withCheckedContinuation { continuation in
-            if signaled {
-                continuation.resume()
-            } else {
-                waiter = continuation
+        let (stream, continuation) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
+        self.continuation = continuation
+        if signaled {
+            continuation.finish()
+            self.continuation = nil
+            return
+        }
+        await withTaskCancellationHandler {
+            for await _ in stream {
+                return
             }
+        } onCancel: {
+            continuation.finish()
         }
     }
 }
