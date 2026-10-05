@@ -12,6 +12,16 @@ import NIOHTTP1
 import NIOHTTPCompression
 import NIOTransportServices
 
+#if !canImport(Network)
+/// Every Linux QUIC channel shares this loop.
+///
+/// SwiftNetwork updates a stream's send offset on that channel's event loop. One loop keeps a
+/// HEADERS block and its FIN on the same stream when several connections are open.
+package enum HTTP3EventLoop {
+    package static let shared = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+}
+#endif
+
 /// One side of the HTTP/3 race. Failures stay in `RaceFailures` because `Error` is not `Sendable`.
 private enum TransportAttempt: Sendable {
     case quic(Channel)
@@ -255,7 +265,7 @@ extension HTTPConnection {
             }
             .connect(host: components.host, port: components.port)
         #else
-        let connected = DatagramBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+        let connected = DatagramBootstrap(group: HTTP3EventLoop.shared)
             .channelOption(.socketOption(.so_reuseaddr), value: reuse)
             .channelOption(.socketOption(.so_rcvbuf), value: udpBuffer)
             .channelOption(.socketOption(.so_sndbuf), value: udpBuffer)
