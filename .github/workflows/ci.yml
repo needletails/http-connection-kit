@@ -104,9 +104,88 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .build
-          key: ${{ runner.os }}-swift-6.4.0-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          key: ${{ runner.os }}-swift-6.4.0-${{ hashFiles('Package.swift') }}
           restore-keys: |
             ${{ runner.os }}-swift-6.4.0-
 
       - name: Test
         run: swift test
+
+  android:
+    name: Test (Android, Swift 6.4.0)
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      SWIFT_CERTIFICATES_ALLOW_SWIFT_CRYPTO_BETA: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Skip.tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew update
+          brew install skiptools/skip/skip
+          skip version
+
+      - name: Install Swiftly 1.2.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          SWIFTLY_PKG="$RUNNER_TEMP/swiftly-1.2.0.pkg"
+          curl -fsSL https://download.swift.org/swiftly/darwin/swiftly-1.2.0.pkg -o "$SWIFTLY_PKG"
+          echo "a1b48692b00ea6902957423473c87bee7c7f3e18c015a4a09317102f6820b987  $SWIFTLY_PKG" | shasum -a 256 --check
+          installer -pkg "$SWIFTLY_PKG" -target CurrentUserHomeDirectory
+          "$HOME/.swiftly/bin/swiftly" init --assume-yes --no-modify-profile --skip-install
+          echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"
+          SWIFTLY_VERSION=$("$HOME/.swiftly/bin/swiftly" --version)
+          echo "Swiftly $SWIFTLY_VERSION"
+          [[ "$SWIFTLY_VERSION" == "1.2.0" ]]
+
+      - name: Install Swift Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Homebrew's swiftly, pulled in by Skip, requests a swift-6.4-RELEASE
+          # URL that does not exist. Swiftly 1.2.0 is the release that fetches 6.4.0.
+          export PATH="$HOME/.swiftly/bin:$PATH"
+          hash -r
+          SWIFTLY_VERSION=$(swiftly --version)
+          echo "Using $(command -v swiftly) ($SWIFTLY_VERSION)"
+          [[ "$SWIFTLY_VERSION" == "1.2.0" ]]
+          printf 'y\n' | skip android sdk install --version 6.4.0 --swift-version 6.4.0
+
+      - name: Install Android SDK and emulator
+        shell: bash
+        run: |
+          set -eu
+          export PATH="$HOME/.swiftly/bin:$PATH"
+          echo "ANDROID_HOME=$HOME/Library/Android/sdk" >> "$GITHUB_ENV"
+          echo "$HOME/Library/Android/sdk/platform-tools" >> "$GITHUB_PATH"
+          echo "$HOME/Library/Android/sdk/emulator" >> "$GITHUB_PATH"
+          printf 'y\n%.0s' {1..30} | skip android home install --plain
+          printf 'y\n%.0s' {1..30} | skip android emulator create --plain
+
+      - name: Launch Android emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.swiftly/bin:$PATH"
+          skip android emulator launch --plain --headless --background --android-connect-timeout 300
+
+      - name: Cache Swift package build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: android-swift-6.4.0-${{ hashFiles('Package.swift') }}
+          restore-keys: |
+            android-swift-6.4.0-
+
+      - name: Test on Android
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.swiftly/bin:$PATH"
+          skip android test --plain --swift-version 6.4.0 --arch aarch64 --android-connect-timeout 180

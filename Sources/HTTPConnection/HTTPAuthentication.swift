@@ -360,7 +360,7 @@ actor ProviderAuthenticationSession<Provider: HTTPAuthenticationProvider>: HTTPA
                 } catch {
                     result = .failure(error)
                 }
-                await self.completeRefresh(id, result: result)
+                self.completeRefresh(id, result: result)
             }
             refresh = SharedRefresh(id: id, task: task)
         }

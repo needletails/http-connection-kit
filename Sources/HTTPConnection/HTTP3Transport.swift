@@ -5,11 +5,15 @@
 //  Created by NeedleTails on 10/5/26.
 //
 
+import Foundation
 import Logging
 import NIOCore
 import NIOHTTPTypes
 @_spi(PackageInternal) import NIOHTTP3
 import NIOQUIC
+#if os(Android)
+import X509
+#endif
 
 /// NIOTS connected datagrams are `ByteBuffer`. QUIC reads and writes `AddressedEnvelope`.
 ///
@@ -58,6 +62,7 @@ extension HTTPConnection {
             try channel.pipeline.syncOperations.addHandler(ConnectedDatagramEnvelopeAdapter())
         }
         let peerVerification = tls.certificateVerification.quic
+        let verifier = try Self.makeVerifier(peerVerification: peerVerification, eventLoop: channel.eventLoop)
         let configuration = QUICConfiguration.client(
             verificationConfiguration: .x509Certificates(trustRootsFilePath: nil),
             applicationProtocols: ["h3"],
@@ -73,10 +78,7 @@ extension HTTPConnection {
         let quicHandler = QUICHandler(
             channel: channel,
             quicConfiguration: configuration,
-            asyncVerifier: AsyncVerifier(
-                certificateVerification: peerVerification,
-                eventLoop: channel.eventLoop
-            ),
+            asyncVerifier: verifier,
             authenticator: nil,
             logger: Logger(label: "http-connection-kit.quic"),
             inboundConnectionInitializer: { connection, _ in
@@ -88,6 +90,28 @@ extension HTTPConnection {
             noMoreConnections: {}
         )
         try channel.pipeline.syncOperations.addHandler(quicHandler)
+    }
+
+    /// Builds the QUIC certificate verifier.
+    ///
+    /// SwiftCertificates looks for a PEM bundle under `/etc/ssl`. Android ships its trust anchors as
+    /// one PEM file per CA in a directory, which is the store NIOSSL already uses for TCP.
+    static func makeVerifier(
+        peerVerification: NIOQUIC.CertificateVerification,
+        eventLoop: any EventLoop
+    ) throws -> AsyncVerifier {
+        #if os(Android)
+        if !AndroidSystemTrustRoots.certificates.isEmpty,
+           let verifier = try? AsyncVerifier(
+               trustRoots: AndroidSystemTrustRoots.certificates,
+               certificateVerification: peerVerification,
+               eventLoop: eventLoop
+           )
+        {
+            return verifier
+        }
+        #endif
+        return AsyncVerifier(certificateVerification: peerVerification, eventLoop: eventLoop)
     }
 
     /// Opens one HTTP/3 request stream.
@@ -166,3 +190,42 @@ extension HTTPConnection {
         return try await Self.resolveChannel(opened.map { $0.0 })
     }
 }
+
+#if os(Android)
+/// Trust anchors from Android's system CA directory.
+///
+/// `CertificateStore.systemTrustRoots` only reads a single PEM bundle under `/etc/ssl`. One
+/// unreadable file must not drop the rest, and a failure to load them must not stop QUIC from opening.
+enum AndroidSystemTrustRoots {
+    static let certificates: [Certificate] = load()
+
+    private static func load() -> [Certificate] {
+        let directories = [
+            "/apex/com.android.conscrypt/cacerts",
+            "/system/etc/security/cacerts",
+        ]
+        let fileManager = FileManager.default
+        guard let directory = directories.first(where: { fileManager.fileExists(atPath: $0) }),
+              let names = try? fileManager.contentsOfDirectory(atPath: directory)
+        else {
+            return []
+        }
+        var certificates: [Certificate] = []
+        for name in names {
+            let path = directory + "/" + name
+            guard let text = try? String(contentsOfFile: path, encoding: .utf8),
+                  let start = text.range(of: "-----BEGIN CERTIFICATE-----"),
+                  let end = text.range(of: "-----END CERTIFICATE-----"),
+                  start.lowerBound < end.lowerBound
+            else {
+                continue
+            }
+            let block = String(text[start.lowerBound..<end.upperBound])
+            if let certificate = try? Certificate(pemEncoded: block) {
+                certificates.append(certificate)
+            }
+        }
+        return certificates
+    }
+}
+#endif

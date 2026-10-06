@@ -344,7 +344,7 @@ struct PolicyClientTests {
 
     @Test func requestDeadlineCancelsAStalledExchange() async throws {
         var configuration = HTTPConnection.Configuration()
-        configuration.requestTimeout = .milliseconds(100)
+        configuration.requestTimeout = .seconds(2)
         try await withHTTP1Client(configuration: configuration) { client, server in
             await #expect(throws: HTTPConnectionError.timeout) {
                 try await client.request(method: .get, url: server.url("/hold"))

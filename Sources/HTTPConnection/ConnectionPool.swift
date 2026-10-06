@@ -242,6 +242,11 @@ extension HTTPConnection {
         _ components: RequestComponents,
         cancelTarget: CancelTarget
     ) async throws -> Channel {
+        #if os(Android)
+        // The QUIC loop is shared with in-process servers. Reading the CA directory inside the
+        // channel initializer stalls every datagram on that loop.
+        _ = AndroidSystemTrustRoots.certificates
+        #endif
         let udp: Channel
         let channelOptions = configuration.channel
         let tls = configuration.tls
