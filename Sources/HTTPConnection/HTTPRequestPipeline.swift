@@ -49,6 +49,9 @@ extension HTTPConnection {
                 onProgress: onProgress
             )
         }
+        // Set before the deadline cancels the exchange, so the exchange can tell a timeout from
+        // caller cancellation and drain the pooled connection it was using.
+        let deadline = CancelFlag()
         return try await withThrowingTaskGroup(of: RequestResult.self) { group in
             group.addTask {
                 try await self.requestPreparedWithoutTimeout(
@@ -57,12 +60,14 @@ extension HTTPConnection {
                     headers: headers,
                     body: body,
                     collect: collect,
-                    onProgress: onProgress
+                    onProgress: onProgress,
+                    deadline: deadline
                 )
             }
             group.addTask {
                 let nanoseconds = UInt64(max(timeout.httpConnectionNanoseconds, 0))
                 try await Task.sleep(nanoseconds: nanoseconds)
+                deadline.cancel()
                 throw HTTPConnectionError.timeout
             }
             defer { group.cancelAll() }
@@ -79,7 +84,8 @@ extension HTTPConnection {
         headers: HTTPFields,
         body: HTTPBody?,
         collect: Bool,
-        onProgress: (@Sendable (HTTPProgress) -> Void)?
+        onProgress: (@Sendable (HTTPProgress) -> Void)?,
+        deadline: CancelFlag? = nil
     ) async throws -> RequestResult {
         if method == .connect {
             throw HTTPConnectionError.unimplemented
@@ -133,7 +139,8 @@ extension HTTPConnection {
                 headers: headers,
                 body: body,
                 collect: collect,
-                onProgress: onProgress
+                onProgress: onProgress,
+                deadline: deadline
             )
 
             switch result {
@@ -439,7 +446,8 @@ extension HTTPConnection {
         headers: HTTPFields,
         body: HTTPBody?,
         collect: Bool,
-        onProgress: (@Sendable (HTTPProgress) -> Void)?
+        onProgress: (@Sendable (HTTPProgress) -> Void)?,
+        deadline: CancelFlag?
     ) async throws -> RequestResult {
         let cancelTarget = CancelTarget()
         var context = ExchangeContext(
@@ -458,35 +466,7 @@ extension HTTPConnection {
                 cancelTarget.set(connection.channel, closesParent: true)
             }
             context.usesHTTP1Chunked = connection.version.major == 1 && connection.version.minor >= 1
-            if connection.version == .http2 {
-                let request = try await Self.openHTTP2Request(
-                    on: connection.channel,
-                    enableTLS: components.enableTLS,
-                    cancelTarget: cancelTarget,
-                    decompressionLimit: decompressionLimit
-                )
-                return try await self.runHTTP1Exchange(
-                    request: request,
-                    context: context,
-                    requestVersion: .http1_1,
-                    collect: collect,
-                    cancelTarget: cancelTarget
-                )
-            } else if connection.version == .http3 {
-                guard #available(anyAppleOS 26, *) else {
-                    throw HTTPConnectionError.unimplemented
-                }
-                let request = try await Self.openHTTP3Request(
-                    on: connection.channel,
-                    cancelTarget: cancelTarget
-                )
-                return try await self.runHTTP3Exchange(
-                    request: request,
-                    context: context,
-                    collect: collect,
-                    cancelTarget: cancelTarget
-                )
-            } else {
+            guard connection.version == .http2 || connection.version == .http3 else {
                 let request = try await Self.openHTTP1Request(
                     on: connection.channel,
                     cancelTarget: cancelTarget
@@ -499,9 +479,83 @@ extension HTTPConnection {
                     cancelTarget: cancelTarget
                 )
             }
+
+            // Pooled connections count their streams so a deadline drains only this connection
+            // and only after its other streams finish. A dead connection goes inactive and is
+            // forgotten on its own; a stream reset by the peer leaves the connection healthy.
+            // The deadline is the one failure the pool cannot observe from the channel.
+            let pooled = ObjectIdentifier(connection.channel)
+            streamOpened(on: pooled)
+            let result: RequestResult
+            do {
+                result = try await runMultiplexedExchange(
+                    on: connection.channel,
+                    version: connection.version,
+                    context: context,
+                    collect: collect,
+                    cancelTarget: cancelTarget
+                )
+            } catch {
+                streamClosed(on: pooled)
+                if deadline?.isCancelled == true {
+                    drain(pooled)
+                }
+                throw error
+            }
+            switch result {
+            case .collected:
+                streamClosed(on: pooled)
+            case .streaming(let streamed):
+                guard let lifetime = streamed.lifetime else {
+                    streamClosed(on: pooled)
+                    break
+                }
+                Task {
+                    await lifetime.finished()
+                    self.streamClosed(on: pooled)
+                }
+            }
+            return result
         } onCancel: {
             cancelTarget.close()
         }
+    }
+
+    private func runMultiplexedExchange(
+        on channel: Channel,
+        version: HTTPVersion,
+        context: ExchangeContext,
+        collect: Bool,
+        cancelTarget: CancelTarget
+    ) async throws -> RequestResult {
+        if version == .http2 {
+            let request = try await Self.openHTTP2Request(
+                on: channel,
+                enableTLS: context.components.enableTLS,
+                cancelTarget: cancelTarget,
+                decompressionLimit: decompressionLimit
+            )
+            return try await runHTTP1Exchange(
+                request: request,
+                context: context,
+                requestVersion: .http1_1,
+                collect: collect,
+                cancelTarget: cancelTarget
+            )
+        }
+        guard #available(anyAppleOS 26, *) else {
+            throw HTTPConnectionError.unimplemented
+        }
+        let request = try await Self.openHTTP3Request(
+            on: channel,
+            cancelTarget: cancelTarget
+        )
+        return try await runHTTP3Exchange(
+            request: request,
+            context: context,
+            collect: collect,
+            cancelTarget: cancelTarget
+        )
     }
 
     private var decompressionLimit: NIOHTTPDecompression.DecompressionLimit? {
@@ -630,7 +684,9 @@ extension HTTPConnection {
             }
         }
         _ = cancelTarget
-        return .streaming(StreamingResponse(head: head, body: httpBody, trailerBox: trailerBox))
+        return .streaming(
+            StreamingResponse(head: head, body: httpBody, trailerBox: trailerBox, lifetime: lifetime)
+        )
     }
 
     static func mapDecompression(_ error: Error) -> Error {
@@ -765,7 +821,9 @@ extension HTTPConnection {
             }
         }
         _ = cancelTarget
-        return .streaming(StreamingResponse(head: head, body: httpBody, trailerBox: trailerBox))
+        return .streaming(
+            StreamingResponse(head: head, body: httpBody, trailerBox: trailerBox, lifetime: lifetime)
+        )
     }
 
     private func inflateIfNeeded(_ response: Response) throws -> Response {

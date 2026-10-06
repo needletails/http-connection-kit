@@ -66,6 +66,11 @@ struct LiveConnection: Sendable {
     var key: ConnectionKey
     var channel: Channel
     var lastUsedNanoseconds: UInt64
+    /// Request streams currently open on this connection.
+    var activeStreams = 0
+    /// Set after a request on this connection hit its deadline. New requests skip it; the channel
+    /// closes once `activeStreams` reaches zero.
+    var isDraining = false
 
     var negotiatedVersion: HTTPVersion {
         HTTPVersion(major: key.major, minor: key.minor)

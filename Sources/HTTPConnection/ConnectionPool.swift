@@ -122,7 +122,8 @@ extension HTTPConnection {
         if let idleTimeout = configuration.pool.idleTimeout {
             let limit = UInt64(max(idleTimeout.httpConnectionNanoseconds, 0))
             let expired = connections.filter { _, connection in
-                now >= connection.lastUsedNanoseconds
+                connection.activeStreams == 0
+                    && now >= connection.lastUsedNanoseconds
                     && now - connection.lastUsedNanoseconds >= limit
             }
             for (id, connection) in expired {
@@ -135,6 +136,7 @@ extension HTTPConnection {
                 connection.key.host == components.host
                     && connection.key.port == components.port
                     && connection.key.enableTLS == components.enableTLS
+                    && !connection.isDraining
                     && connection.channel.isActive
                     && (connection.negotiatedVersion == .http2 || connection.negotiatedVersion == .http3)
                     && Self.withinCap(connection.negotiatedVersion, cap: cap)
@@ -177,6 +179,41 @@ extension HTTPConnection {
 
     private func forget(_ id: ObjectIdentifier) {
         connections.removeValue(forKey: id)
+    }
+
+    /// Records a request stream opened on a pooled HTTP/2 or HTTP/3 connection.
+    func streamOpened(on id: ObjectIdentifier) {
+        connections[id]?.activeStreams += 1
+    }
+
+    /// Records a request stream that finished. A draining connection closes with its last stream.
+    func streamClosed(on id: ObjectIdentifier) {
+        guard var connection = connections[id] else {
+            return
+        }
+        connection.activeStreams = max(connection.activeStreams - 1, 0)
+        connections[id] = connection
+        if connection.isDraining, connection.activeStreams == 0 {
+            connections.removeValue(forKey: id)
+            Self.discard(connection.channel)
+        }
+    }
+
+    /// Stops handing out a connection whose request hit its deadline.
+    ///
+    /// Streams already open on it keep running. A newly created connection that failed is already
+    /// closed by its `CancelTarget`, so this only removes the pool entry.
+    func drain(_ id: ObjectIdentifier) {
+        guard var connection = connections[id] else {
+            return
+        }
+        if connection.activeStreams == 0 {
+            connections.removeValue(forKey: id)
+            Self.discard(connection.channel)
+            return
+        }
+        connection.isDraining = true
+        connections[id] = connection
     }
 
     /// Waits for the QUIC handshake to succeed or fail. TCP is already connecting.

@@ -168,6 +168,47 @@ struct HTTP2ClientTests {
         await server.stop()
     }
 
+    @Test func aTimedOutRequestDrainsOnlyItsConnection() async throws {
+        try await withTLSClient(mode: .http2, preferred: .http2) { client, server in
+            // A streaming sibling keeps the first connection busy while another request times out.
+            let streamed = try await client.requestStream(method: .get, url: server.url("/drip"))
+            var iterator = streamed.body.makeAsyncIterator()
+            #expect(try await iterator.next() == Data("HELLO".utf8))
+            await server.gates.drip.wait()
+            #expect(server.accepts.count == 1)
+
+            await #expect(throws: HTTPConnectionError.timeout) {
+                try await client.request(
+                    method: .get,
+                    url: server.url("/hold"),
+                    headers: [:],
+                    body: nil,
+                    options: .init(timeout: .milliseconds(100))
+                )
+            }
+
+            // The next request opens a fresh connection instead of reusing the suspect one.
+            let response = try await client.request(method: .get, url: server.url("/echo"), headers: [:], body: nil)
+            #expect(response.head.status.code == 200)
+            #expect(server.accepts.count == 2)
+
+            // The sibling on the drained connection still completes.
+            await server.gates.dripRelease.signal()
+            #expect(try await iterator.next() == Data("WORLD".utf8))
+            #expect(try await iterator.next() == nil)
+        }
+    }
+
+    @Test func anErrorStatusDoesNotDrainTheConnection() async throws {
+        try await withTLSClient(mode: .http2, preferred: .http2) { client, server in
+            let failed = try await client.request(method: .get, url: server.url("/status/503"), headers: [:], body: nil)
+            #expect(failed.head.status.code == 503)
+            let next = try await client.request(method: .get, url: server.url("/echo"), headers: [:], body: nil)
+            #expect(next.head.status.code == 200)
+            #expect(server.accepts.count == 1)
+        }
+    }
+
     @Test func http1OverTLS() async throws {
         try await withTLSClient(mode: .http1, preferred: .http1_1) { client, server in
             let response = try await client.request(

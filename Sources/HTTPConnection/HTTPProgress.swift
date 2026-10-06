@@ -28,11 +28,14 @@ public struct StreamingResponse: Sendable {
     public var head: HTTPResponse
     public var body: HTTPBody
     private let trailerBox: TrailerBox
+    /// The pump that feeds `body`; nil for responses assembled without a socket.
+    let lifetime: StreamLifetime?
 
-    init(head: HTTPResponse, body: HTTPBody, trailerBox: TrailerBox) {
+    init(head: HTTPResponse, body: HTTPBody, trailerBox: TrailerBox, lifetime: StreamLifetime? = nil) {
         self.head = head
         self.body = body
         self.trailerBox = trailerBox
+        self.lifetime = lifetime
     }
 
     /// Trailers after the body has been fully consumed.
@@ -45,6 +48,7 @@ final class ProgressCounter: @unchecked Sendable {
     var value: Int64 = 0
 }
 
+/// Owns the pump task behind a streaming body.
 final class StreamLifetime: @unchecked Sendable {
     private let task: Task<Void, Never>
 
@@ -54,6 +58,11 @@ final class StreamLifetime: @unchecked Sendable {
 
     func cancel() {
         task.cancel()
+    }
+
+    /// Resolves when the pump has finished, whether the stream completed, failed, or was cancelled.
+    func finished() async {
+        await task.value
     }
 
     deinit {
