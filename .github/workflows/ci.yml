@@ -128,7 +128,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          brew update
+          export HOMEBREW_NO_AUTO_UPDATE=1
           brew install skiptools/skip/skip
           skip version
 
@@ -183,30 +183,53 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$HOME/.swiftly/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          adb kill-server || true
+          adb start-server
           nohup "$ANDROID_HOME/emulator/emulator" \
             -avd hck \
             -no-window \
             -no-audio \
             -no-boot-anim \
             -no-snapshot \
+            -no-metrics \
             -gpu swiftshader_indirect \
-            -accel on \
+            -accel auto \
+            -cores 2 \
             > "$RUNNER_TEMP/emulator.log" 2>&1 &
-          deadline=$((SECONDS + 240))
-          until adb devices | grep -q 'emulator-'; do
-            if (( SECONDS > deadline )); then
-              echo "emulator did not register with adb" >&2
+          emulator_pid=$!
+
+          registration_deadline=$((SECONDS + 180))
+          until adb devices | awk '$1 ~ /^emulator-/ && $2 == "device" { found=1 } END { exit !found }'; do
+            if ! kill -0 "$emulator_pid" 2>/dev/null; then
+              echo "emulator exited before registering with adb" >&2
+              tail -n 200 "$RUNNER_TEMP/emulator.log" >&2 || true
+              exit 1
+            fi
+            if (( SECONDS > registration_deadline )); then
+              echo "emulator did not become online in adb" >&2
+              adb devices -l >&2 || true
               tail -n 200 "$RUNNER_TEMP/emulator.log" >&2 || true
               exit 1
             fi
             sleep 2
           done
-          until adb shell getprop sys.boot_completed | grep -q 1; do
-            if (( SECONDS > deadline )); then
+
+          boot_deadline=$((SECONDS + 600))
+          until [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; do
+            if ! kill -0 "$emulator_pid" 2>/dev/null; then
+              echo "emulator exited before Android finished booting" >&2
+              tail -n 200 "$RUNNER_TEMP/emulator.log" >&2 || true
+              exit 1
+            fi
+            if (( SECONDS > boot_deadline )); then
               echo "emulator did not finish booting" >&2
+              adb devices -l >&2 || true
               tail -n 200 "$RUNNER_TEMP/emulator.log" >&2 || true
               exit 1
             fi
             sleep 2
           done
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
           skip android test --plain --swift-version 6.4.0 --arch x86_64 --android-connect-timeout 60
