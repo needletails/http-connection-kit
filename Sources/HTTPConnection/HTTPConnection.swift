@@ -69,7 +69,7 @@ public actor HTTPConnection: Request {
         url: URL,
         headers: HTTPFields = [:],
         body: Data? = nil
-    ) async throws -> Response {
+    ) async throws -> HCKResponse {
         let components = try requestComponents(from: url)
 
         switch method {
@@ -102,7 +102,7 @@ public actor HTTPConnection: Request {
     public func request(
         _ request: HTTPRequest,
         body: HTTPBody? = nil
-    ) async throws -> Response {
+    ) async throws -> HCKResponse {
         try await collectedRequest(
             method: request.method,
             url: try requestURL(request),
@@ -117,7 +117,7 @@ public actor HTTPConnection: Request {
         url: URL,
         headers: HTTPFields,
         body: HTTPBody
-    ) async throws -> Response {
+    ) async throws -> HCKResponse {
         try await collectedRequest(method: method, url: url, headers: headers, body: body)
     }
 
@@ -127,7 +127,7 @@ public actor HTTPConnection: Request {
         url: URL,
         headers: HTTPFields,
         body: S
-    ) async throws -> Response where S.Element == Data {
+    ) async throws -> HCKResponse where S.Element == Data {
         let stream = HTTPBody.sequence(body)
         return try await collectedRequest(method: method, url: url, headers: headers, body: stream)
     }

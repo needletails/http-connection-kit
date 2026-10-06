@@ -12,20 +12,20 @@ import HTTPTypes
 ///
 /// The method, URL, headers, and optional body are the whole request. The connection selects the
 /// protocol during the handshake.
-public protocol Request: Sendable {
+protocol HCKRequest: Sendable {
     func request(
         method: HTTPRequest.Method,
         url: URL,
         headers: HTTPFields,
         body: Data?
-    ) async throws -> Response
+    ) async throws -> HCKResponse
 }
 
 /// A completed HTTP response.
 ///
 /// `head` is the status and header fields. `body` is the collected payload, or `nil` when the
 /// response had no body.
-public struct Response: Sendable {
+public struct HCKResponse: Sendable {
     public var head: HTTPResponse
     public var body: Data?
 
@@ -39,6 +39,9 @@ public struct Response: Sendable {
         HTTPChallenge.parse(head.headerFields)
     }
 }
+
+typealias Request = HCKRequest
+typealias Response = HCKResponse
 
 /// Failures produced while preparing or finishing a request.
 public enum HTTPConnectionError: Error, Equatable, Sendable {

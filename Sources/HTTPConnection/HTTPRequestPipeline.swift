@@ -784,7 +784,7 @@ extension HTTPConnection {
         return Response(head: head, body: data.isEmpty ? nil : data)
     }
 
-    public func resumeDownload(from url: URL, to fileURL: URL) async throws -> Response {
+    public func resumeDownload(from url: URL, to fileURL: URL) async throws -> HCKResponse {
         let sidecar = URL(fileURLWithPath: fileURL.path + ".http-range")
         let attributes = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
         let existing = (attributes?[.size] as? NSNumber)?.intValue ?? 0
