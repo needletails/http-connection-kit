@@ -1,7 +1,7 @@
 # HTTPConnectionKit
 
 [![Swift](https://img.shields.io/badge/Swift-6.4-orange.svg)](https://swift.org)
-[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-blue.svg)](https://swift.org)
+[![Platform](https://img.shields.io/badge/Platform-iOS%20%7C%20macOS%20%7C%20Linux%20%7C%20Android-blue.svg)](https://swift.org)
 
 An HTTP client for HTTP/1, HTTP/2, and HTTP/3. `HTTPConnection` is an actor. Create one instance for a TLS policy and reuse it across requests. `shutdown()` waits for deterministic cleanup; dropping the client also closes its pooled connections as a best-effort safety net.
 
