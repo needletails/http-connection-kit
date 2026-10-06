@@ -72,7 +72,7 @@ struct PublicServerTests {
 
     private func cloudflareTrace(
         preferred version: HTTPVersion,
-        quicIdleTimeout: HTTPConnection.Configuration.Interval? = nil
+        quicIdleTimeout: Duration? = nil
     ) async throws -> String {
         try await requireTCP(host: "cloudflare.com")
         var configuration = HTTPConnection.Configuration()

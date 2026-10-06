@@ -26,7 +26,7 @@ func headerFields(_ pairs: (String, String)...) -> HTTPFields {
     return fields
 }
 
-func responseHeader(_ response: Response, _ name: String) -> String? {
+func responseHeader(_ response: HCKResponse, _ name: String) -> String? {
     response.head.headerFields[HTTPField.Name(name)!]
 }
 
@@ -36,7 +36,18 @@ func withClient<T>(
     configuration: HTTPConnection.Configuration = HTTPConnection.Configuration(),
     _ body: (HTTPConnection) async throws -> T
 ) async throws -> T {
-    let client = HTTPConnection(preferred: version, configuration: configuration)
+    var configuration = configuration
+    switch version {
+    case .http1_0:
+        configuration.protocols = .prefer(.http1_0, fallback: [])
+    case .http1_1:
+        configuration.protocols = .prefer(.http1_1, fallback: [])
+    case .http2:
+        configuration.protocols = .prefer(.http2, fallback: [.http1_1])
+    default:
+        configuration.protocols = .default
+    }
+    let client = HTTPConnection(configuration: configuration)
     do {
         let value = try await body(client)
         await client.shutdown()
@@ -93,7 +104,7 @@ func withHTTP3Client<T>(
     _ body: (HTTPConnection, HTTP3FixtureServer) async throws -> T
 ) async throws -> T {
     var configuration = configuration
-    if configuration.channel.quicIdleTimeout.nanoseconds == HTTPConnection.Configuration().channel.quicIdleTimeout.nanoseconds {
+    if configuration.channel.quicIdleTimeout == HTTPConnection.Configuration().channel.quicIdleTimeout {
         configuration.channel.quicIdleTimeout = .seconds(10)
     }
     let server = try await HTTP3FixtureServer.bind()

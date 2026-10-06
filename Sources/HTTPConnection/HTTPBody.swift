@@ -148,8 +148,16 @@ public struct HTTPBody: AsyncSequence, Sendable {
     }
 
     public static func sequence<S: AsyncSequence & Sendable>(_ sequence: S) -> Self where S.Element == Data {
+        Self.sequence(sequence, length: nil)
+    }
+
+    /// Creates a one-shot body from a sequence with a known content length.
+    public static func sequence<S: AsyncSequence & Sendable>(
+        _ sequence: S,
+        length: Int64?
+    ) -> Self where S.Element == Data {
         let reader = SequenceReader(sequence)
-        return .oneShot {
+        return .oneShot(length: length) {
             try await reader.next()
         }
     }

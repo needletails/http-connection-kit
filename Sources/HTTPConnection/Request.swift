@@ -45,6 +45,10 @@ typealias Response = HCKResponse
 
 /// Failures produced while preparing or finishing a request.
 public enum HTTPConnectionError: Error, Equatable, Sendable {
+    /// The supplied configuration contains an invalid range or combination.
+    case invalidConfiguration(HTTPConnection.Configuration.ValidationError)
+    /// The peer selected a protocol other than the one required by configuration.
+    case protocolNegotiationFailed
     /// The client does not perform this operation. CONNECT opens a tunnel and is not sent as a request.
     case unimplemented
     /// The URL or the message on the wire could not be used.
@@ -70,7 +74,10 @@ public enum HTTPConnectionError: Error, Equatable, Sendable {
 
     public static func == (lhs: Self, rhs: Self) -> Bool {
         switch (lhs, rhs) {
-        case (.unimplemented, .unimplemented),
+        case (.invalidConfiguration(let lhs), .invalidConfiguration(let rhs)):
+            lhs == rhs
+        case (.protocolNegotiationFailed, .protocolNegotiationFailed),
+             (.unimplemented, .unimplemented),
              (.invalidRequest, .invalidRequest),
              (.invalidMultipart, .invalidMultipart),
              (.bodyAlreadyConsumed, .bodyAlreadyConsumed),

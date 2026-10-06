@@ -92,7 +92,7 @@ struct HTTP3ClientTests {
     @Test func aFailedRequestDoesNotPreventALaterHTTP3Request() async throws {
         guard #available(anyAppleOS 26, *) else { return }
         var configuration = uncheckedTLSConfiguration()
-        configuration.channel.connectTimeout = .milliseconds(400)
+        configuration.timeouts.connect = .milliseconds(400)
         configuration.channel.quicIdleTimeout = .seconds(2)
         try await withClient(preferred: .http3, configuration: configuration) { client in
             await #expect(throws: Error.self) {
@@ -116,7 +116,8 @@ struct HTTP3ClientTests {
         let server = try await HTTP3FixtureServer.bind()
         var configuration = uncheckedTLSConfiguration()
         configuration.channel.quicIdleTimeout = .seconds(10)
-        let client = HTTPConnection(preferred: .http3, configuration: configuration)
+        configuration.protocols = .default
+        let client = HTTPConnection(configuration: configuration)
         let holdURL = server.url("/hold")
         let task = Task {
             try await client.request(method: .get, url: holdURL, headers: [:], body: nil)

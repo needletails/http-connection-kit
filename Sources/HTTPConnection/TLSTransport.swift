@@ -98,8 +98,16 @@ extension HTTPConnection {
             prepared = channel.eventLoop.makeCompletedFuture {
                 var configuration = TLSConfiguration.makeClientConfiguration()
                 configuration.minimumTLSVersion = tls.minimumVersion.niossl
+                configuration.maximumTLSVersion = tls.maximumVersion?.niossl
                 configuration.certificateVerification = tls.certificateVerification.niossl
                 configuration.applicationProtocols = protocols
+                if let trustRoots = tls.trustRoots.certificates {
+                    configuration.trustRoots = .certificates(trustRoots)
+                }
+                if let identity = tls.clientIdentity {
+                    configuration.certificateChain = identity.certificateChain
+                    configuration.privateKey = identity.privateKey
+                }
                 let context = try NIOSSLContext(configuration: configuration)
                 let handler = try NIOSSLClientHandler(
                     context: context,
@@ -194,6 +202,9 @@ extension HTTPConnection {
         let options = NWProtocolTLS.Options()
         let security = options.securityProtocolOptions
         sec_protocol_options_set_min_tls_protocol_version(security, tls.minimumVersion.nw)
+        if let maximumVersion = tls.maximumVersion {
+            sec_protocol_options_set_max_tls_protocol_version(security, maximumVersion.nw)
+        }
         sec_protocol_options_set_tls_server_name(security, serverHostname)
         for alpn in Self.alpnProtocols(offeringHTTP2: offeringHTTP2) {
             alpn.withCString { name in

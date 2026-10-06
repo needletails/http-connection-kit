@@ -65,6 +65,7 @@ struct ConnectionKey: Hashable, Sendable {
 struct LiveConnection: Sendable {
     var key: ConnectionKey
     var channel: Channel
+    var lastUsedNanoseconds: UInt64
 
     var negotiatedVersion: HTTPVersion {
         HTTPVersion(major: key.major, minor: key.minor)

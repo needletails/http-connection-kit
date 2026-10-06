@@ -223,11 +223,11 @@ public struct BearerTokenProvider: HTTPAuthenticationProvider {
 /// Bounds repeated refreshes without scheduling a retry timer.
 public struct HTTPAuthenticationRefreshWindow: Sendable, Equatable {
     public var maximumAttempts: Int
-    public var interval: HTTPConnection.Configuration.Interval
+    public var interval: Duration
 
     public init(
         maximumAttempts: Int = 5,
-        interval: HTTPConnection.Configuration.Interval = .seconds(30)
+        interval: Duration = .seconds(30)
     ) {
         self.maximumAttempts = maximumAttempts
         self.interval = interval
@@ -235,7 +235,7 @@ public struct HTTPAuthenticationRefreshWindow: Sendable, Equatable {
 
     public static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.maximumAttempts == rhs.maximumAttempts
-            && lhs.interval.nanoseconds == rhs.interval.nanoseconds
+            && lhs.interval == rhs.interval
     }
 }
 
@@ -414,7 +414,7 @@ actor ProviderAuthenticationSession<Provider: HTTPAuthenticationProvider>: HTTPA
     }
 
     private func recordRefresh(now: Date = Date()) throws {
-        let seconds = TimeInterval(window.interval.nanoseconds) / 1_000_000_000
+        let seconds = TimeInterval(window.interval.httpConnectionNanoseconds) / 1_000_000_000
         refreshDates.removeAll { now.timeIntervalSince($0) >= seconds }
         guard window.maximumAttempts > 0, refreshDates.count < window.maximumAttempts else {
             throw HTTPConnectionError.authenticationRefreshLimitExceeded

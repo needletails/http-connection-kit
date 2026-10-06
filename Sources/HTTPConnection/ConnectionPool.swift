@@ -74,7 +74,16 @@ extension HTTPConnection {
         }
 
         let opened: (Channel, HTTPVersion)
-        if shouldRaceQUIC(components) {
+        if configuration.protocols.requiredVersion == .http3 {
+            if #available(anyAppleOS 26, *) {
+                opened = (
+                    try await openQUIC(components, cancelTarget: cancelTarget),
+                    .http3
+                )
+            } else {
+                throw HTTPConnectionError.unimplemented
+            }
+        } else if shouldRaceQUIC(components) {
             if #available(anyAppleOS 26, *) {
                 opened = try await raceQUIC(components, cancelTarget: cancelTarget)
             } else {
@@ -86,11 +95,18 @@ extension HTTPConnection {
 
         let channel = opened.0
         let negotiated = opened.1
+        if let required = configuration.protocols.requiredVersion,
+           negotiated != required.nio
+        {
+            await Self.closeConnection(channel)
+            throw HTTPConnectionError.protocolNegotiationFailed
+        }
         if negotiated == .http2 || negotiated == .http3 {
             let id = ObjectIdentifier(channel)
             connections[id] = LiveConnection(
                 key: ConnectionKey(components: components, version: negotiated),
-                channel: channel
+                channel: channel,
+                lastUsedNanoseconds: DispatchTime.now().uptimeNanoseconds
             )
             channel.closeFuture.whenComplete { _ in
                 Task { await self.forget(id) }
@@ -102,28 +118,49 @@ extension HTTPConnection {
     /// Highest active HTTP/2 or HTTP/3 connection for this origin that is still within the cap.
     private func reusableConnection(for components: RequestComponents) -> LiveConnection? {
         let cap = version
-        return connections.values
-            .filter { connection in
+        let now = DispatchTime.now().uptimeNanoseconds
+        if let idleTimeout = configuration.pool.idleTimeout {
+            let limit = UInt64(max(idleTimeout.httpConnectionNanoseconds, 0))
+            let expired = connections.filter { _, connection in
+                now >= connection.lastUsedNanoseconds
+                    && now - connection.lastUsedNanoseconds >= limit
+            }
+            for (id, connection) in expired {
+                connections.removeValue(forKey: id)
+                Self.discard(connection.channel)
+            }
+        }
+        guard let selected = connections
+            .filter({ _, connection in
                 connection.key.host == components.host
                     && connection.key.port == components.port
                     && connection.key.enableTLS == components.enableTLS
                     && connection.channel.isActive
                     && (connection.negotiatedVersion == .http2 || connection.negotiatedVersion == .http3)
                     && Self.withinCap(connection.negotiatedVersion, cap: cap)
-            }
-            .max { lhs, rhs in
-                let left = lhs.negotiatedVersion
-                let right = rhs.negotiatedVersion
+            })
+            .max(by: { lhs, rhs in
+                let left = lhs.value.negotiatedVersion
+                let right = rhs.value.negotiatedVersion
                 if left.major != right.major {
                     return left.major < right.major
                 }
                 return left.minor < right.minor
-            }
+            })
+        else {
+            return nil
+        }
+        connections[selected.key]?.lastUsedNanoseconds = now
+        return selected.value
     }
 
     /// HTTP/3 runs beside TCP only for HTTPS when the cap allows it and this origin has not failed QUIC.
     private func shouldRaceQUIC(_ components: RequestComponents) -> Bool {
-        components.enableTLS && version.major >= 3 && !quicDeniedOrigins.contains(Origin(components))
+        components.enableTLS
+            && version.major >= 3
+            && configuration.tls.clientIdentity == nil
+            && configuration.tls.trustRoots.usesSystemDefault
+            && !quicDeniedOrigins.contains(Origin(components))
     }
 
     /// The HTTP/1 request-line version used when the server does not select HTTP/2.
@@ -254,7 +291,7 @@ extension HTTPConnection {
         let udpBuffer = SocketOptionValue(channelOptions.udpBufferBytes)
         #if canImport(Network)
         let connected = NIOTSDatagramConnectionBootstrap(group: NIOTSEventLoopGroup.singleton)
-            .connectTimeout(Self.timeAmount(channelOptions.connectTimeout))
+            .connectTimeout(Self.timeAmount(configuration.timeouts.connect))
             .channelOption(NIOTSChannelOptions.waitForActivity, value: false)
             .channelOption(NIOTSChannelOptions.allowLocalEndpointReuse, value: channelOptions.reuseLocalEndpoint)
             .channelOption(NIOTSChannelOptions.maximumReceiveLength, value: channelOptions.maximumReceiveLength)
@@ -314,45 +351,69 @@ extension HTTPConnection {
         let offerHTTP2 = components.enableTLS && version.major >= 2
         let http1 = http1RequestVersion
         let decompressionLimit: NIOHTTPDecompression.DecompressionLimit? =
-            configuration.decompressResponses
-            ? .ratio(max(configuration.decompressionRatioLimit, 1))
+            configuration.decompression.isEnabled
+            ? .ratio(configuration.decompression.ratioLimit)
             : nil
         let negotiation = offerHTTP2 ? NegotiationSlot(http1: http1, decompressionLimit: decompressionLimit) : nil
         let channelOptions = configuration.channel
         let tls = configuration.tls
-        let connectTimeout = Self.timeAmount(channelOptions.connectTimeout)
+        let connectTimeout = Self.timeAmount(configuration.timeouts.connect)
         let writeBuffer = Self.writeBufferWaterMark(channelOptions)
         let noDelay = Self.socketEnabled(channelOptions.tcpNoDelay)
         let keepAlive = Self.socketEnabled(channelOptions.keepAlive)
         let reuse = Self.socketEnabled(channelOptions.reuseLocalEndpoint)
         let channel: Channel
         #if canImport(Network)
-        var bootstrap = NIOTSConnectionBootstrap(group: NIOTSEventLoopGroup.singleton)
-            .connectTimeout(connectTimeout)
-            .channelOption(.tcpOption(.tcp_nodelay), value: noDelay)
-            .channelOption(.socketOption(.so_keepalive), value: keepAlive)
-            .channelOption(.allowRemoteHalfClosure, value: true)
-            .channelOption(.writeBufferWaterMark, value: writeBuffer)
-            .channelOption(NIOTSChannelOptions.waitForActivity, value: false)
-            .channelOption(NIOTSChannelOptions.allowLocalEndpointReuse, value: channelOptions.reuseLocalEndpoint)
-            .channelOption(NIOTSChannelOptions.maximumReceiveLength, value: channelOptions.maximumReceiveLength)
-            .channelInitializer { channel in
-                Self.installTCPHandlers(
-                    on: channel,
-                    serverHostname: components.host,
-                    enableTLS: components.enableTLS,
-                    negotiateTLSInPipeline: false,
-                    tls: tls,
-                    negotiation: negotiation,
-                    decompressionLimit: decompressionLimit
+        if tls.clientIdentity != nil || !tls.trustRoots.usesSystemDefault {
+            channel = try await Self.resolveChannel(
+                ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+                    .channelOption(.socketOption(.so_reuseaddr), value: reuse)
+                    .channelOption(.tcpOption(.tcp_nodelay), value: noDelay)
+                    .channelOption(.socketOption(.so_keepalive), value: keepAlive)
+                    .channelOption(.allowRemoteHalfClosure, value: true)
+                    .channelOption(.writeBufferWaterMark, value: writeBuffer)
+                    .connectTimeout(connectTimeout)
+                    .channelInitializer { channel in
+                        Self.installTCPHandlers(
+                            on: channel,
+                            serverHostname: components.host,
+                            enableTLS: components.enableTLS,
+                            negotiateTLSInPipeline: true,
+                            tls: tls,
+                            negotiation: negotiation,
+                            decompressionLimit: decompressionLimit
+                        )
+                    }
+                    .connect(host: components.host, port: components.port)
+            )
+        } else {
+            var bootstrap = NIOTSConnectionBootstrap(group: NIOTSEventLoopGroup.singleton)
+                .connectTimeout(connectTimeout)
+                .channelOption(.tcpOption(.tcp_nodelay), value: noDelay)
+                .channelOption(.socketOption(.so_keepalive), value: keepAlive)
+                .channelOption(.allowRemoteHalfClosure, value: true)
+                .channelOption(.writeBufferWaterMark, value: writeBuffer)
+                .channelOption(NIOTSChannelOptions.waitForActivity, value: false)
+                .channelOption(NIOTSChannelOptions.allowLocalEndpointReuse, value: channelOptions.reuseLocalEndpoint)
+                .channelOption(NIOTSChannelOptions.maximumReceiveLength, value: channelOptions.maximumReceiveLength)
+                .channelInitializer { channel in
+                    Self.installTCPHandlers(
+                        on: channel,
+                        serverHostname: components.host,
+                        enableTLS: components.enableTLS,
+                        negotiateTLSInPipeline: false,
+                        tls: tls,
+                        negotiation: negotiation,
+                        decompressionLimit: decompressionLimit
+                    )
+                }
+            if components.enableTLS {
+                bootstrap = bootstrap.tlsOptions(
+                    Self.nwTLSOptions(serverHostname: components.host, offeringHTTP2: offerHTTP2, tls: tls)
                 )
             }
-        if components.enableTLS {
-            bootstrap = bootstrap.tlsOptions(
-                Self.nwTLSOptions(serverHostname: components.host, offeringHTTP2: offerHTTP2, tls: tls)
-            )
+            channel = try await Self.resolveChannel(bootstrap.connect(host: components.host, port: components.port))
         }
-        channel = try await Self.resolveChannel(bootstrap.connect(host: components.host, port: components.port))
         #else
         channel = try await Self.resolveChannel(
             ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
@@ -399,8 +460,8 @@ extension HTTPConnection {
         }
     }
 
-    private static func timeAmount(_ interval: Configuration.Interval) -> TimeAmount {
-        .nanoseconds(interval.nanoseconds)
+    private static func timeAmount(_ interval: Duration) -> TimeAmount {
+        .nanoseconds(interval.httpConnectionNanoseconds)
     }
 
     private static func writeBufferWaterMark(

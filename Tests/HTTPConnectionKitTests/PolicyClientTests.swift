@@ -48,7 +48,7 @@ struct PolicyClientTests {
     @Test(arguments: TestHTTP.allCases)
     func redirectLimitAndUnreplayableBody(_ version: TestHTTP) async throws {
         var configuration = HTTPConnection.Configuration()
-        configuration.maximumRedirects = 8
+        configuration.redirects = .follow(maximum: 8)
         if version == .http2 {
             configuration.tls.certificateVerification = .none
         }
@@ -108,7 +108,7 @@ struct PolicyClientTests {
     @Test(arguments: TestHTTP.allCases)
     func aGzipBombHitsTheRatioLimit(_ version: TestHTTP) async throws {
         var configuration = HTTPConnection.Configuration()
-        configuration.decompressionRatioLimit = 10
+        configuration.decompression = .enabled(ratioLimit: 10)
         if version == .http2 {
             configuration.tls.certificateVerification = .none
         }
@@ -169,20 +169,6 @@ struct PolicyClientTests {
             #expect(response.head.status.code == 200)
             let body = String(decoding: try #require(response.body), as: UTF8.self)
             #expect(body.contains("nonce=\"xyz\""))
-        }
-    }
-
-    @Test func proxyAuthorizationUsesTheProxyHeader() async throws {
-        var configuration = HTTPConnection.Configuration()
-        configuration.proxyAuthentication = ChallengeAuthenticationProvider(mode: .basic)
-        try await withHTTP1Client(configuration: configuration) { client, server in
-            let response = try await client.request(
-                method: .get,
-                url: server.url("/auth/proxy"),
-                headers: [:],
-                body: nil
-            )
-            #expect(response.head.status.code == 200)
         }
     }
 
@@ -344,10 +330,28 @@ struct PolicyClientTests {
 
     @Test func requestDeadlineCancelsAStalledExchange() async throws {
         var configuration = HTTPConnection.Configuration()
-        configuration.requestTimeout = .seconds(2)
+        configuration.timeouts.request = .seconds(2)
         try await withHTTP1Client(configuration: configuration) { client, server in
             await #expect(throws: HTTPConnectionError.timeout) {
                 try await client.request(method: .get, url: server.url("/hold"))
+            }
+            let response = try await client.request(method: .get, url: server.url("/echo"))
+            #expect(response.head.status.code == 200)
+        }
+    }
+
+    @Test func perRequestDeadlineOverridesTheConfiguredDeadline() async throws {
+        var configuration = HTTPConnection.Configuration()
+        configuration.timeouts.request = .seconds(30)
+        try await withHTTP1Client(configuration: configuration) { client, server in
+            await #expect(throws: HTTPConnectionError.timeout) {
+                try await client.request(
+                    method: .get,
+                    url: server.url("/hold"),
+                    headers: [:],
+                    body: nil,
+                    options: .init(timeout: .milliseconds(50))
+                )
             }
             let response = try await client.request(method: .get, url: server.url("/echo"))
             #expect(response.head.status.code == 200)
@@ -498,7 +502,7 @@ struct PolicyClientTests {
         configuration.authentication = TestAuthenticationProvider(probe: probe)
         try await withHTTP1Client(configuration: configuration) { client, server in
             let url = server.url("/auth/refresh")
-            try await withThrowingTaskGroup(of: Response.self) { group in
+            try await withThrowingTaskGroup(of: HCKResponse.self) { group in
                 for _ in 0..<8 {
                     group.addTask {
                         try await client.request(

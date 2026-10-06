@@ -126,7 +126,7 @@ struct StreamingClientTests {
 
     @Test func cancellingExpectContinueDoesNotSendTheBody() async throws {
         var configuration = HTTPConnection.Configuration()
-        configuration.expectContinueTimeout = .seconds(30)
+        configuration.timeouts.expectContinue = .seconds(30)
         try await withHTTP1Client(configuration: configuration) { client, server in
             let pulled = PullFlag()
             let body = HTTPBody.oneShot {
@@ -218,7 +218,6 @@ struct StreamingClientTests {
     func octetsArePackedIntoChunks(_ version: TestHTTP) async throws {
         let log = ProgressLog()
         var configuration = HTTPConnection.Configuration()
-        configuration.onProgress = { log.append($0) }
         if version == .http2 {
             configuration.tls.certificateVerification = .none
         }
@@ -231,7 +230,8 @@ struct StreamingClientTests {
                 method: .post,
                 url: url("/echo"),
                 headers: headers,
-                body: body
+                body: body,
+                options: .init(onProgress: { log.append($0) })
             )
             let echo = FixtureEcho(try #require(response.body))
             #expect(echo.body == Data(bytes))
@@ -266,7 +266,7 @@ struct StreamingClientTests {
     @Test(arguments: TestHTTP.allCases)
     func expectContinueAcceptsRejectsAndTimesOut(_ version: TestHTTP) async throws {
         var configuration = HTTPConnection.Configuration()
-        configuration.expectContinueTimeout = .milliseconds(200)
+        configuration.timeouts.expectContinue = .milliseconds(200)
         if version == .http2 {
             configuration.tls.certificateVerification = .none
         }
@@ -348,12 +348,15 @@ struct StreamingClientTests {
     func progressReportsTheFirstDripChunk(_ version: TestHTTP) async throws {
         let log = ProgressLog()
         var configuration = HTTPConnection.Configuration()
-        configuration.onProgress = { log.append($0) }
         if version == .http2 {
             configuration.tls.certificateVerification = .none
         }
         try await withLocalClient(version, configuration: configuration) { client, url, gates, _ in
-            let streamed = try await client.requestStream(method: .get, url: url("/drip"))
+            let streamed = try await client.requestStream(
+                method: .get,
+                url: url("/drip"),
+                options: .init(onProgress: { log.append($0) })
+            )
             var iterator = streamed.body.makeAsyncIterator()
             #expect(try await iterator.next() == Data("HELLO".utf8))
             let first = log.snapshot().filter { $0.direction == .download }

@@ -15,7 +15,7 @@ struct ExchangeContext: Sendable {
     var headers: HTTPFields
     var body: HTTPBody?
     var requestVersion: HTTPVersion
-    var expectContinueTimeout: HTTPConnection.Configuration.Interval
+    var expectContinueTimeout: Duration
     var onProgress: (@Sendable (HTTPProgress) -> Void)?
     var usesHTTP1Chunked: Bool
 }

@@ -184,24 +184,23 @@ struct HTTP1ClientTests {
         }
     }
 
-    @Test func clampedWriteBufferStillServesARequest() async throws {
+    @Test func invalidWriteBufferWatermarksAreRejected() async {
         var configuration = HTTPConnection.Configuration()
         configuration.channel.writeBufferLowWaterMark = 8_192
         configuration.channel.writeBufferHighWaterMark = 1
-        try await withHTTP1Client(configuration: configuration) { client, server in
-            let response = try await client.request(
-                method: .get,
-                url: server.url("/echo"),
-                headers: [:],
-                body: nil
-            )
-            #expect(response.head.status.code == 200)
+        let client = HTTPConnection(configuration: configuration)
+        await #expect(
+            throws: HTTPConnectionError.invalidConfiguration(.invalidWriteBufferWaterMarks)
+        ) {
+            try await client.request(method: .get, url: URL(string: "http://127.0.0.1/")!)
         }
     }
 
     @Test func shutdownAllowsALaterRequest() async throws {
         let server = try await HTTP1FixtureServer.bind()
-        let client = HTTPConnection(preferred: .http1_1)
+        var configuration = HTTPConnection.Configuration()
+        configuration.protocols = .prefer(.http1_1, fallback: [])
+        let client = HTTPConnection(configuration: configuration)
         _ = try await client.request(method: .get, url: server.url("/echo"), headers: [:], body: nil)
         await client.shutdown()
         let response = try await client.request(method: .get, url: server.url("/echo"), headers: [:], body: nil)
@@ -213,7 +212,9 @@ struct HTTP1ClientTests {
 
     @Test func cancellationEndsTheRequestAndTheNextOneOpensANewConnection() async throws {
         let server = try await HTTP1FixtureServer.bind()
-        let client = HTTPConnection(preferred: .http1_1)
+        var configuration = HTTPConnection.Configuration()
+        configuration.protocols = .prefer(.http1_1, fallback: [])
+        let client = HTTPConnection(configuration: configuration)
         let holdURL = server.url("/hold")
         let task = Task {
             try await client.request(method: .get, url: holdURL, headers: [:], body: nil)

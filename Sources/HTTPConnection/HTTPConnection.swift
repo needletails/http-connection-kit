@@ -23,20 +23,34 @@ public actor HTTPConnection: Request {
     let version: HTTPVersion
     /// Channel and TLS settings applied to every connection this client opens.
     let configuration: Configuration
+    let configurationValidationError: Configuration.ValidationError?
     let authenticationSession: (any HTTPAuthenticationSession)?
-    let proxyAuthenticationSession: (any HTTPAuthenticationSession)?
     var connections: [ObjectIdentifier: LiveConnection] = [:]
     /// Origins whose QUIC handshake failed while TCP succeeded. Later requests on this client use TCP.
     var quicDeniedOrigins: Set<Origin> = []
 
-    /// Creates a client whose preferred version is the highest protocol it may negotiate.
-    public init(preferred version: HTTPVersion = .http3, configuration: Configuration = Configuration()) {
-        self.version = version
+    /// Creates a client using the protocol negotiation policy in `configuration`.
+    public init(configuration: Configuration = Configuration()) {
+        version = configuration.protocols.preferredVersion.nio
         self.configuration = configuration
+        do {
+            try configuration.validate()
+            configurationValidationError = nil
+        } catch {
+            configurationValidationError = error
+        }
         authenticationSession = configuration.authentication.map {
             makeAuthenticationSession($0, window: configuration.authenticationRefreshWindow)
         }
-        proxyAuthenticationSession = configuration.proxyAuthentication.map {
+    }
+
+    /// Creates a client and reports an invalid configuration immediately.
+    public init(validating configuration: Configuration) throws (Configuration.ValidationError) {
+        try configuration.validate()
+        version = configuration.protocols.preferredVersion.nio
+        self.configuration = configuration
+        configurationValidationError = nil
+        authenticationSession = configuration.authentication.map {
             makeAuthenticationSession($0, window: configuration.authenticationRefreshWindow)
         }
     }
@@ -70,44 +84,40 @@ public actor HTTPConnection: Request {
         headers: HTTPFields = [:],
         body: Data? = nil
     ) async throws -> HCKResponse {
-        let components = try requestComponents(from: url)
+        try await request(method: method, url: url, headers: headers, body: body, options: RequestOptions())
+    }
 
-        switch method {
-        case .connect:
-            throw HTTPConnectionError.unimplemented
-        case .get:
-            return try await performGet(components, headers: headers, body: body)
-        case .head:
-            return try await performHead(components, headers: headers, body: body)
-        case .post:
-            return try await performPost(components, headers: headers, body: body)
-        case .put:
-            return try await performPut(components, headers: headers, body: body)
-        case .patch:
-            return try await performPatch(components, headers: headers, body: body)
-        case .delete:
-            return try await performDelete(components, headers: headers, body: body)
-        case .options:
-            return try await performOptions(components, headers: headers, body: body)
-        case .trace:
-            return try await performTrace(components, headers: headers, body: body)
-        case .query:
-            return try await performQuery(components, headers: headers, body: body)
-        default:
-            return try await performExtension(method, components, headers: headers, body: body)
-        }
+    /// Sends one request with behavior scoped to this request.
+    public func request(
+        method: HTTPRequest.Method,
+        url: URL,
+        headers: HTTPFields = [:],
+        body: Data? = nil,
+        options: RequestOptions
+    ) async throws -> HCKResponse {
+        try await collectedRequest(
+            method: method,
+            url: url,
+            headers: headers,
+            body: body.map(HTTPBody.data),
+            timeout: options.timeout,
+            onProgress: options.onProgress
+        )
     }
 
     /// Sends a swift-http-types request and collects the response.
     public func request(
         _ request: HTTPRequest,
-        body: HTTPBody? = nil
+        body: HTTPBody? = nil,
+        options: RequestOptions = RequestOptions()
     ) async throws -> HCKResponse {
         try await collectedRequest(
             method: request.method,
             url: try requestURL(request),
             headers: request.headerFields,
-            body: body
+            body: body,
+            timeout: options.timeout,
+            onProgress: options.onProgress
         )
     }
 
@@ -116,9 +126,17 @@ public actor HTTPConnection: Request {
         method: HTTPRequest.Method,
         url: URL,
         headers: HTTPFields,
-        body: HTTPBody
+        body: HTTPBody,
+        options: RequestOptions = RequestOptions()
     ) async throws -> HCKResponse {
-        try await collectedRequest(method: method, url: url, headers: headers, body: body)
+        try await collectedRequest(
+            method: method,
+            url: url,
+            headers: headers,
+            body: body,
+            timeout: options.timeout,
+            onProgress: options.onProgress
+        )
     }
 
     /// Sends chunks from any `AsyncSequence` and collects the response.
@@ -126,10 +144,18 @@ public actor HTTPConnection: Request {
         method: HTTPRequest.Method,
         url: URL,
         headers: HTTPFields,
-        body: S
+        body: S,
+        options: RequestOptions = RequestOptions()
     ) async throws -> HCKResponse where S.Element == Data {
         let stream = HTTPBody.sequence(body)
-        return try await collectedRequest(method: method, url: url, headers: headers, body: stream)
+        return try await collectedRequest(
+            method: method,
+            url: url,
+            headers: headers,
+            body: stream,
+            timeout: options.timeout,
+            onProgress: options.onProgress
+        )
     }
 
     /// Returns the response head and a body that is pulled from the socket.
@@ -137,14 +163,17 @@ public actor HTTPConnection: Request {
         method: HTTPRequest.Method,
         url: URL,
         headers: HTTPFields = [:],
-        body: HTTPBody? = nil
+        body: HTTPBody? = nil,
+        options: RequestOptions = RequestOptions()
     ) async throws -> StreamingResponse {
         let result = try await requestPrepared(
             method: method,
             url: url,
             headers: headers,
             body: body,
-            collect: false
+            collect: false,
+            timeout: options.timeout,
+            onProgress: options.onProgress
         )
         switch result {
         case .streaming(let streamed):
@@ -163,13 +192,15 @@ public actor HTTPConnection: Request {
     /// Sends a swift-http-types request and streams the response body.
     public func requestStream(
         _ request: HTTPRequest,
-        body: HTTPBody? = nil
+        body: HTTPBody? = nil,
+        options: RequestOptions = RequestOptions()
     ) async throws -> StreamingResponse {
         try await requestStream(
             method: request.method,
             url: try requestURL(request),
             headers: request.headerFields,
-            body: body
+            body: body,
+            options: options
         )
     }
 
@@ -177,13 +208,15 @@ public actor HTTPConnection: Request {
         method: HTTPRequest.Method,
         url: URL,
         headers: HTTPFields,
-        body: Data?
+        body: Data?,
+        options: RequestOptions = RequestOptions()
     ) async throws -> StreamingResponse {
         try await requestStream(
             method: method,
             url: url,
             headers: headers,
-            body: body.map(HTTPBody.data)
+            body: body.map(HTTPBody.data),
+            options: options
         )
     }
 
@@ -191,13 +224,15 @@ public actor HTTPConnection: Request {
         method: HTTPRequest.Method,
         url: URL,
         headers: HTTPFields = [:],
-        body: S
+        body: S,
+        options: RequestOptions = RequestOptions()
     ) async throws -> StreamingResponse where S.Element == Data {
         try await requestStream(
             method: method,
             url: url,
             headers: headers,
-            body: Optional(HTTPBody.sequence(body))
+            body: Optional(HTTPBody.sequence(body)),
+            options: options
         )
     }
 
@@ -205,13 +240,15 @@ public actor HTTPConnection: Request {
         method: HTTPRequest.Method,
         url: URL,
         headers: HTTPFields = [:],
-        body: HTTPBody
+        body: HTTPBody,
+        options: RequestOptions = RequestOptions()
     ) async throws -> StreamingResponse {
         try await requestStream(
             method: method,
             url: url,
             headers: headers,
-            body: Optional(body)
+            body: Optional(body),
+            options: options
         )
     }
 
@@ -219,14 +256,18 @@ public actor HTTPConnection: Request {
         method: HTTPRequest.Method,
         url: URL,
         headers: HTTPFields,
-        body: HTTPBody?
+        body: HTTPBody?,
+        timeout: Duration?,
+        onProgress: (@Sendable (HTTPProgress) -> Void)? = nil
     ) async throws -> Response {
         let result = try await requestPrepared(
             method: method,
             url: url,
             headers: headers,
             body: body,
-            collect: true
+            collect: true,
+            timeout: timeout,
+            onProgress: onProgress
         )
         guard case .collected(let response) = result else {
             throw HTTPConnectionError.invalidRequest
@@ -298,100 +339,4 @@ public actor HTTPConnection: Request {
         )
     }
 
-    private func performGet(
-        _ components: RequestComponents,
-        headers: HTTPFields,
-        body: Data?
-    ) async throws -> Response {
-        try await performExchange(.get, components, headers: headers, body: body)
-    }
-
-    private func performHead(
-        _ components: RequestComponents,
-        headers: HTTPFields,
-        body: Data?
-    ) async throws -> Response {
-        try await performExchange(.head, components, headers: headers, body: body)
-    }
-
-    private func performPost(
-        _ components: RequestComponents,
-        headers: HTTPFields,
-        body: Data?
-    ) async throws -> Response {
-        try await performExchange(.post, components, headers: headers, body: body)
-    }
-
-    private func performPatch(
-        _ components: RequestComponents,
-        headers: HTTPFields,
-        body: Data?
-    ) async throws -> Response {
-        try await performExchange(.patch, components, headers: headers, body: body)
-    }
-
-    private func performPut(
-        _ components: RequestComponents,
-        headers: HTTPFields,
-        body: Data?
-    ) async throws -> Response {
-        try await performExchange(.put, components, headers: headers, body: body)
-    }
-
-    private func performDelete(
-        _ components: RequestComponents,
-        headers: HTTPFields,
-        body: Data?
-    ) async throws -> Response {
-        try await performExchange(.delete, components, headers: headers, body: body)
-    }
-
-    private func performOptions(
-        _ components: RequestComponents,
-        headers: HTTPFields,
-        body: Data?
-    ) async throws -> Response {
-        try await performExchange(.options, components, headers: headers, body: body)
-    }
-
-    private func performTrace(
-        _ components: RequestComponents,
-        headers: HTTPFields,
-        body: Data?
-    ) async throws -> Response {
-        try await performExchange(.trace, components, headers: headers, body: body)
-    }
-
-    private func performQuery(
-        _ components: RequestComponents,
-        headers: HTTPFields,
-        body: Data?
-    ) async throws -> Response {
-        try await performExchange(.query, components, headers: headers, body: body)
-    }
-
-    /// Extension methods such as WebDAV verbs use the same request shape as the standard methods.
-    private func performExtension(
-        _ method: HTTPRequest.Method,
-        _ components: RequestComponents,
-        headers: HTTPFields,
-        body: Data?
-    ) async throws -> Response {
-        try await performExchange(method, components, headers: headers, body: body)
-    }
-
-    /// Opens the request channel for the negotiated protocol, then reads the response.
-    private func performExchange(
-        _ method: HTTPRequest.Method,
-        _ components: RequestComponents,
-        headers: HTTPFields,
-        body: Data?
-    ) async throws -> Response {
-        try await collectedRequest(
-            method: method,
-            url: components.url,
-            headers: headers,
-            body: body.map(HTTPBody.data)
-        )
-    }
 }

@@ -52,6 +52,17 @@ struct HTTP2ClientTests {
         }
     }
 
+    @Test func anExpiredIdleConnectionIsNotReused() async throws {
+        var configuration = uncheckedTLSConfiguration()
+        configuration.pool.idleTimeout = .milliseconds(1)
+        try await withTLSClient(mode: .http2, preferred: .http2, configuration: configuration) { client, server in
+            _ = try await client.request(method: .get, url: server.url("/echo"))
+            try await Task.sleep(nanoseconds: 5_000_000)
+            _ = try await client.request(method: .get, url: server.url("/echo"))
+            #expect(server.accepts.count == 2)
+        }
+    }
+
     @Test func anHTTP3CapReusesTheNegotiatedHTTP2Connection() async throws {
         var configuration = uncheckedTLSConfiguration()
         configuration.channel.quicIdleTimeout = .seconds(3)
@@ -67,6 +78,8 @@ struct HTTP2ClientTests {
     @Test func tls13AndALowerWriteBufferStillComplete() async throws {
         var configuration = uncheckedTLSConfiguration()
         configuration.tls.minimumVersion = .tlsv13
+        configuration.tls.maximumVersion = .tlsv13
+        configuration.channel.writeBufferLowWaterMark = 32
         configuration.channel.writeBufferHighWaterMark = 64
         try await withTLSClient(mode: .http2, preferred: .http2, configuration: configuration) { client, server in
             let response = try await client.request(
@@ -80,10 +93,32 @@ struct HTTP2ClientTests {
         }
     }
 
+    @Test func aClientIdentityIsPresentedWhenRequested() async throws {
+        let server = try await TLSFixtureServer.bind(.http2, requireClientCertificate: true)
+        let material = LocalTLSMaterial.shared
+        var configuration = uncheckedTLSConfiguration()
+        configuration.tls.clientIdentity = .init(
+            certificateChain: material.clientCertificateChain.map { .certificate($0) },
+            privateKey: .privateKey(material.clientPrivateKey)
+        )
+        configuration.protocols = .prefer(.http2, fallback: [.http1_1])
+        let client = HTTPConnection(configuration: configuration)
+        do {
+            let response = try await client.request(method: .get, url: server.url("/echo"))
+            #expect(response.head.status.code == 200)
+            await client.shutdown()
+            await server.stop()
+        } catch {
+            await client.shutdown()
+            await server.stop()
+            throw error
+        }
+    }
+
     @Test func fullCertificateVerificationRejectsTheSelfSignedServer() async throws {
         var configuration = HTTPConnection.Configuration()
         configuration.tls.certificateVerification = .fullVerification
-        configuration.channel.connectTimeout = .seconds(3)
+        configuration.timeouts.connect = .seconds(3)
         try await withTLSClient(mode: .http2, preferred: .http2, configuration: configuration) { client, server in
             await #expect(throws: Error.self) {
                 try await client.request(method: .get, url: server.url("/echo"), headers: [:], body: nil)
@@ -116,7 +151,9 @@ struct HTTP2ClientTests {
 
     @Test func cancellingAStreamLeavesTheConnectionUsable() async throws {
         let server = try await TLSFixtureServer.bind(.http2)
-        let client = HTTPConnection(preferred: .http2, configuration: uncheckedTLSConfiguration())
+        var configuration = uncheckedTLSConfiguration()
+        configuration.protocols = .prefer(.http2, fallback: [.http1_1])
+        let client = HTTPConnection(configuration: configuration)
         let holdURL = server.url("/hold")
         let task = Task {
             try await client.request(method: .get, url: holdURL, headers: [:], body: nil)

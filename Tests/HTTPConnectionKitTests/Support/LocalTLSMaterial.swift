@@ -21,6 +21,9 @@ enum LocalTLSMaterial {
         var keyPath: String
         var certificateChain: [NIOSSLCertificate]
         var privateKey: NIOSSLPrivateKey
+        var clientCertificateChain: [NIOSSLCertificate]
+        var clientPrivateKey: NIOSSLPrivateKey
+        var trustRoots: [NIOSSLCertificate]
     }
 
     static let shared: Files = {
@@ -32,13 +35,34 @@ enum LocalTLSMaterial {
     }()
 
     private static func make() throws -> Files {
+        let caKey = Certificate.PrivateKey(P256.Signing.PrivateKey())
+        let caName = try DistinguishedName {
+            CommonName("HTTPConnectionKit Test CA")
+        }
+        let now = Date()
+        let caCertificate = try Certificate(
+            version: .v3,
+            serialNumber: Certificate.SerialNumber(),
+            publicKey: caKey.publicKey,
+            notValidBefore: now.addingTimeInterval(-60),
+            notValidAfter: now.addingTimeInterval(60 * 60 * 24),
+            issuer: caName,
+            subject: caName,
+            signatureAlgorithm: .ecdsaWithSHA256,
+            extensions: Certificate.Extensions {
+                Critical(BasicConstraints.isCertificateAuthority(maxPathLength: nil))
+                KeyUsage(keyCertSign: true)
+            },
+            issuerPrivateKey: caKey
+        )
+
         let privateKey = P256.Signing.PrivateKey()
         let key = Certificate.PrivateKey(privateKey)
         let name = try DistinguishedName {
             CommonName("127.0.0.1")
         }
         let extensions = try Certificate.Extensions {
-            BasicConstraints.notCertificateAuthority
+            Critical(BasicConstraints.notCertificateAuthority)
             Critical(
                 KeyUsage(digitalSignature: true)
             )
@@ -48,18 +72,38 @@ enum LocalTLSMaterial {
                 .ipAddress(ASN1OctetString(contentBytes: [127, 0, 0, 1])),
             ])
         }
-        let now = Date()
         let certificate = try Certificate(
             version: .v3,
             serialNumber: Certificate.SerialNumber(),
             publicKey: key.publicKey,
             notValidBefore: now.addingTimeInterval(-60),
             notValidAfter: now.addingTimeInterval(60 * 60 * 24),
-            issuer: name,
+            issuer: caName,
             subject: name,
             signatureAlgorithm: .ecdsaWithSHA256,
             extensions: extensions,
-            issuerPrivateKey: key
+            issuerPrivateKey: caKey
+        )
+
+        let clientKey = Certificate.PrivateKey(P256.Signing.PrivateKey())
+        let clientName = try DistinguishedName {
+            CommonName("HTTPConnectionKit Test Client")
+        }
+        let clientCertificate = try Certificate(
+            version: .v3,
+            serialNumber: Certificate.SerialNumber(),
+            publicKey: clientKey.publicKey,
+            notValidBefore: now.addingTimeInterval(-60),
+            notValidAfter: now.addingTimeInterval(60 * 60 * 24),
+            issuer: caName,
+            subject: clientName,
+            signatureAlgorithm: .ecdsaWithSHA256,
+            extensions: Certificate.Extensions {
+                Critical(BasicConstraints.notCertificateAuthority)
+                Critical(KeyUsage(digitalSignature: true))
+                try ExtendedKeyUsage([.clientAuth])
+            },
+            issuerPrivateKey: caKey
         )
 
         let directory = FileManager.default.temporaryDirectory
@@ -67,14 +111,25 @@ enum LocalTLSMaterial {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let certificateURL = directory.appendingPathComponent("cert.pem")
         let keyURL = directory.appendingPathComponent("key.pem")
-        try certificate.serializeAsPEM().pemString.write(to: certificateURL, atomically: true, encoding: .utf8)
+        let clientCertificateURL = directory.appendingPathComponent("client-cert.pem")
+        let clientKeyURL = directory.appendingPathComponent("client-key.pem")
+        let caURL = directory.appendingPathComponent("ca.pem")
+        try (certificate.serializeAsPEM().pemString + "\n" + caCertificate.serializeAsPEM().pemString)
+            .write(to: certificateURL, atomically: true, encoding: .utf8)
         try key.serializeAsPEM().pemString.write(to: keyURL, atomically: true, encoding: .utf8)
+        try (clientCertificate.serializeAsPEM().pemString + "\n" + caCertificate.serializeAsPEM().pemString)
+            .write(to: clientCertificateURL, atomically: true, encoding: .utf8)
+        try clientKey.serializeAsPEM().pemString.write(to: clientKeyURL, atomically: true, encoding: .utf8)
+        try caCertificate.serializeAsPEM().pemString.write(to: caURL, atomically: true, encoding: .utf8)
 
         return Files(
             certificatePath: certificateURL.path,
             keyPath: keyURL.path,
             certificateChain: try NIOSSLCertificate.fromPEMFile(certificateURL.path),
-            privateKey: try NIOSSLPrivateKey(file: keyURL.path, format: .pem)
+            privateKey: try NIOSSLPrivateKey(file: keyURL.path, format: .pem),
+            clientCertificateChain: try NIOSSLCertificate.fromPEMFile(clientCertificateURL.path),
+            clientPrivateKey: try NIOSSLPrivateKey(file: clientKeyURL.path, format: .pem),
+            trustRoots: try NIOSSLCertificate.fromPEMFile(caURL.path)
         )
     }
 }

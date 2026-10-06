@@ -73,7 +73,10 @@ final class TLSFixtureServer {
 
     var hold: HoldGate { gates.hold }
 
-    static func bind(_ mode: Mode) async throws -> TLSFixtureServer {
+    static func bind(
+        _ mode: Mode,
+        requireClientCertificate: Bool = false
+    ) async throws -> TLSFixtureServer {
         let material = LocalTLSMaterial.shared
         var tls = TLSConfiguration.makeServerConfiguration(
             certificateChain: material.certificateChain.map { .certificate($0) },
@@ -81,6 +84,10 @@ final class TLSFixtureServer {
         )
         tls.minimumTLSVersion = .tlsv12
         tls.applicationProtocols = mode == .http2 ? ["h2"] : ["http/1.1"]
+        if requireClientCertificate {
+            tls.trustRoots = .certificates(material.trustRoots)
+            tls.certificateVerification = .noHostnameVerification
+        }
         let context = try NIOSSLContext(configuration: tls)
         let accepts = AcceptCounter()
         let gates = FixtureGates()

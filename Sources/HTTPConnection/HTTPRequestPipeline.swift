@@ -32,15 +32,21 @@ extension HTTPConnection {
         url: URL,
         headers: HTTPFields,
         body: HTTPBody?,
-        collect: Bool
+        collect: Bool,
+        timeout requestTimeout: Duration? = nil,
+        onProgress: (@Sendable (HTTPProgress) -> Void)? = nil
     ) async throws -> RequestResult {
-        guard let timeout = configuration.requestTimeout else {
+        if let configurationValidationError {
+            throw HTTPConnectionError.invalidConfiguration(configurationValidationError)
+        }
+        guard let timeout = requestTimeout ?? configuration.timeouts.request else {
             return try await requestPreparedWithoutTimeout(
                 method: method,
                 url: url,
                 headers: headers,
                 body: body,
-                collect: collect
+                collect: collect,
+                onProgress: onProgress
             )
         }
         return try await withThrowingTaskGroup(of: RequestResult.self) { group in
@@ -50,11 +56,12 @@ extension HTTPConnection {
                     url: url,
                     headers: headers,
                     body: body,
-                    collect: collect
+                    collect: collect,
+                    onProgress: onProgress
                 )
             }
             group.addTask {
-                let nanoseconds = UInt64(max(timeout.nanoseconds, 0))
+                let nanoseconds = UInt64(max(timeout.httpConnectionNanoseconds, 0))
                 try await Task.sleep(nanoseconds: nanoseconds)
                 throw HTTPConnectionError.timeout
             }
@@ -71,7 +78,8 @@ extension HTTPConnection {
         url: URL,
         headers: HTTPFields,
         body: HTTPBody?,
-        collect: Bool
+        collect: Bool,
+        onProgress: (@Sendable (HTTPProgress) -> Void)?
     ) async throws -> RequestResult {
         if method == .connect {
             throw HTTPConnectionError.unimplemented
@@ -124,7 +132,8 @@ extension HTTPConnection {
                 components: components,
                 headers: headers,
                 body: body,
-                collect: collect
+                collect: collect,
+                onProgress: onProgress
             )
 
             switch result {
@@ -152,7 +161,7 @@ extension HTTPConnection {
                 ) {
                     continue
                 }
-                if configuration.followRedirects, let next = try redirectTarget(
+                if configuration.redirects.follows, let next = try redirectTarget(
                     response: response,
                     current: url,
                     method: &method,
@@ -169,7 +178,6 @@ extension HTTPConnection {
                 await configuration.cookieJar.store(response: streamed.head.headerFields, from: url)
                 let status = streamed.head.status.code
                 let hasAuthenticationHandler = status == 401 && authenticationSession != nil
-                    || status == 407 && proxyAuthenticationSession != nil
                 if hasAuthenticationHandler || shouldFollow(status: status) {
                     let collected = try await collectStream(streamed)
                     if try await applyProviderAuthenticationIfNeeded(
@@ -212,7 +220,7 @@ extension HTTPConnection {
     }
 
     private func stripInflatedEncoding(_ head: HTTPResponse) -> HTTPResponse {
-        guard configuration.decompressResponses, let encoding = head.headerFields[.contentEncoding] else {
+        guard configuration.decompression.isEnabled, let encoding = head.headerFields[.contentEncoding] else {
             return head
         }
         let remaining = encoding
@@ -229,7 +237,7 @@ extension HTTPConnection {
     }
 
     private func shouldFollow(status: Int) -> Bool {
-        configuration.followRedirects && isRedirect(status)
+        configuration.redirects.follows && isRedirect(status)
     }
 
     private func preparedHeaders(
@@ -239,7 +247,7 @@ extension HTTPConnection {
         previousSite: String?
     ) async -> HTTPFields {
         var headers = headers
-        if configuration.decompressResponses, headers[.acceptEncoding] == nil {
+        if configuration.decompression.isEnabled, headers[.acceptEncoding] == nil {
             headers[.acceptEncoding] = "deflate, gzip"
         }
         let host = url.host?.lowercased() ?? ""
@@ -300,11 +308,10 @@ extension HTTPConnection {
         digestNonceCount: inout Int
     ) async throws -> Bool {
         let status = response.head.status.code
-        guard status == 401 || status == 407 else {
+        guard status == 401 else {
             return false
         }
-        let session = status == 407 ? proxyAuthenticationSession : authenticationSession
-        guard let session else {
+        guard let authenticationSession else {
             return false
         }
         let challenges = response.challenges
@@ -317,7 +324,7 @@ extension HTTPConnection {
         if challengeRetries >= 2 || (challengeRetries >= 1 && !digestStale) {
             return false
         }
-        guard let credentials = await session.credentials(for: challenges, url: url) else {
+        guard let credentials = await authenticationSession.credentials(for: challenges, url: url) else {
             return false
         }
         guard let challenge = preferredChallenge(challenges, credentials: credentials) else {
@@ -342,8 +349,7 @@ extension HTTPConnection {
         ) else {
             return false
         }
-        let name: HTTPField.Name = status == 407 ? .proxyAuthorization : header.name
-        headers[name] = header.value
+        headers[header.name] = header.value
         challengeRetries += 1
         digestNonceCount += 1
         return true
@@ -381,7 +387,7 @@ extension HTTPConnection {
             return nil
         }
         redirectCount += 1
-        if redirectCount > configuration.maximumRedirects {
+        if redirectCount > configuration.redirects.maximum {
             throw HTTPConnectionError.tooManyRedirects
         }
         guard let location = response.head.headerFields[.location],
@@ -432,7 +438,8 @@ extension HTTPConnection {
         components: RequestComponents,
         headers: HTTPFields,
         body: HTTPBody?,
-        collect: Bool
+        collect: Bool,
+        onProgress: (@Sendable (HTTPProgress) -> Void)?
     ) async throws -> RequestResult {
         let cancelTarget = CancelTarget()
         var context = ExchangeContext(
@@ -441,8 +448,8 @@ extension HTTPConnection {
             headers: headers,
             body: body,
             requestVersion: HTTPVersion(major: version.major >= 2 ? 1 : version.major, minor: version.major >= 2 ? 1 : version.minor),
-            expectContinueTimeout: configuration.expectContinueTimeout,
-            onProgress: configuration.onProgress,
+            expectContinueTimeout: configuration.timeouts.expectContinue,
+            onProgress: onProgress,
             usesHTTP1Chunked: false
         )
         return try await withTaskCancellationHandler {
@@ -498,8 +505,8 @@ extension HTTPConnection {
     }
 
     private var decompressionLimit: NIOHTTPDecompression.DecompressionLimit? {
-        configuration.decompressResponses
-            ? .ratio(max(configuration.decompressionRatioLimit, 1))
+        configuration.decompression.isEnabled
+            ? .ratio(configuration.decompression.ratioLimit)
             : nil
     }
 
@@ -523,7 +530,7 @@ extension HTTPConnection {
                 headers: headers
             )
             try await outbound.write(.head(head))
-            let timeout = UInt64(max(context.expectContinueTimeout.nanoseconds, 1))
+            let timeout = UInt64(max(context.expectContinueTimeout.httpConnectionNanoseconds, 1))
             if let part = try await mailbox.next(timeoutNanoseconds: timeout) {
                 if case .head(let received) = part, !isInformational(received.status.code) {
                     return received
@@ -704,7 +711,7 @@ extension HTTPConnection {
             throw HTTPConnectionError.invalidRequest
         }
         let encoding = head.headerFields[.contentEncoding]?.lowercased()
-        let inflate = configuration.decompressResponses && (encoding == "gzip" || encoding == "deflate")
+        let inflate = configuration.decompression.isEnabled && (encoding == "gzip" || encoding == "deflate")
         if inflate {
             head.headerFields[.contentEncoding] = nil
             head.headerFields[.contentLength] = nil
@@ -715,7 +722,7 @@ extension HTTPConnection {
         let inflater: ZlibInflater? = inflate
             ? ZlibInflater(
                 format: encoding == "gzip" ? .gzip : .deflate,
-                ratioLimit: configuration.decompressionRatioLimit
+                ratioLimit: configuration.decompression.ratioLimit
             )
             : nil
         let httpBody = HTTPBody.oneShot(lifetime: lifetime) {
@@ -762,7 +769,7 @@ extension HTTPConnection {
     }
 
     private func inflateIfNeeded(_ response: Response) throws -> Response {
-        guard configuration.decompressResponses else {
+        guard configuration.decompression.isEnabled else {
             return response
         }
         let encoding = response.head.headerFields[.contentEncoding]?.lowercased()
@@ -771,7 +778,7 @@ extension HTTPConnection {
         }
         let inflater = ZlibInflater(
             format: encoding == "gzip" ? .gzip : .deflate,
-            ratioLimit: configuration.decompressionRatioLimit
+            ratioLimit: configuration.decompression.ratioLimit
         )
         var data = try inflater.push(response.body ?? Data())
         data.append(try inflater.finish())

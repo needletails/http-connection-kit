@@ -111,9 +111,10 @@ struct CookieJarTests {
         let jar = CookieJar()
         var configuration = HTTPConnection.Configuration()
         configuration.cookieJar = jar
+        configuration.protocols = .prefer(.http1_1, fallback: [])
         try await withHTTP1Client(configuration: configuration) { client, server in
             _ = try await client.request(method: .get, url: server.url("/set-cookie"), headers: [:], body: nil)
-            let second = HTTPConnection(preferred: .http1_1, configuration: configuration)
+            let second = HTTPConnection(configuration: configuration)
             let echoed = try await second.request(method: .get, url: server.url("/echo"), headers: [:], body: nil)
             #expect(FixtureEcho(try #require(echoed.body)).fields["header.cookie"] == "session=1")
             await second.shutdown()

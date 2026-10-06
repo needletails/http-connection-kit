@@ -56,8 +56,11 @@ extension HTTPConnection {
         on channel: Channel,
         connectedDatagramBytes: Bool,
         tls: Configuration.TLS,
-        quicIdleTimeout: Configuration.Interval
+        quicIdleTimeout: Duration
     ) throws {
+        guard tls.clientIdentity == nil else {
+            throw HTTPConnectionError.unimplemented
+        }
         if connectedDatagramBytes {
             try channel.pipeline.syncOperations.addHandler(ConnectedDatagramEnvelopeAdapter())
         }
@@ -66,7 +69,7 @@ extension HTTPConnection {
         let configuration = QUICConfiguration.client(
             verificationConfiguration: .x509Certificates(trustRootsFilePath: nil),
             applicationProtocols: ["h3"],
-            maxIdleTimeout: .nanoseconds(quicIdleTimeout.nanoseconds),
+            maxIdleTimeout: .nanoseconds(quicIdleTimeout.httpConnectionNanoseconds),
             initialMaxData: 16_777_216,
             initialMaxStreamDataBidiLocal: 1_048_576,
             initialMaxStreamDataBidiRemote: 1_048_576,
