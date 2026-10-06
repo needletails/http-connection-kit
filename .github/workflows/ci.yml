@@ -113,7 +113,9 @@ jobs:
 
   android:
     name: Test (Android, Swift 6.4.0)
-    runs-on: macos-26
+    # macos-26 is arm64. Those runners cannot boot an Android emulator (HV_UNSUPPORTED).
+    # macos-15-intel can, so the test binary targets the x86_64 emulator ABI.
+    runs-on: macos-15-intel
     timeout-minutes: 60
     env:
       SWIFT_CERTIFICATES_ALLOW_SWIFT_CRYPTO_BETA: "1"
@@ -166,26 +168,45 @@ jobs:
           echo "$HOME/Library/Android/sdk/platform-tools" >> "$GITHUB_PATH"
           echo "$HOME/Library/Android/sdk/emulator" >> "$GITHUB_PATH"
           printf 'y\n%.0s' {1..30} | skip android home install --plain
-          printf 'y\n%.0s' {1..30} | skip android emulator create --plain
-
-      - name: Launch Android emulator
-        shell: bash
-        run: |
-          set -euo pipefail
-          export PATH="$HOME/.swiftly/bin:$PATH"
-          skip android emulator launch --plain --headless --background --android-connect-timeout 300
+          printf 'y\n%.0s' {1..30} | skip android emulator create --plain --name hck --arch x86_64 --android-api-level 34
 
       - name: Cache Swift package build
         uses: actions/cache@v4
         with:
           path: .build
-          key: android-swift-6.4.0-${{ hashFiles('Package.swift') }}
+          key: android-x86_64-swift-6.4.0-${{ hashFiles('Package.swift') }}
           restore-keys: |
-            android-swift-6.4.0-
+            android-x86_64-swift-6.4.0-
 
       - name: Test on Android
         shell: bash
         run: |
           set -euo pipefail
-          export PATH="$HOME/.swiftly/bin:$PATH"
-          skip android test --plain --swift-version 6.4.0 --arch aarch64 --android-connect-timeout 180
+          export PATH="$HOME/.swiftly/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          nohup "$ANDROID_HOME/emulator/emulator" \
+            -avd hck \
+            -no-window \
+            -no-audio \
+            -no-boot-anim \
+            -no-snapshot \
+            -gpu swiftshader_indirect \
+            -accel on \
+            > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          deadline=$((SECONDS + 240))
+          until adb devices | grep -q 'emulator-'; do
+            if (( SECONDS > deadline )); then
+              echo "emulator did not register with adb" >&2
+              tail -n 200 "$RUNNER_TEMP/emulator.log" >&2 || true
+              exit 1
+            fi
+            sleep 2
+          done
+          until adb shell getprop sys.boot_completed | grep -q 1; do
+            if (( SECONDS > deadline )); then
+              echo "emulator did not finish booting" >&2
+              tail -n 200 "$RUNNER_TEMP/emulator.log" >&2 || true
+              exit 1
+            fi
+            sleep 2
+          done
+          skip android test --plain --swift-version 6.4.0 --arch x86_64 --android-connect-timeout 60
