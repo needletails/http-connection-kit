@@ -88,6 +88,59 @@ final class CancelFlag: @unchecked Sendable {
     }
 }
 
+/// One result that several tasks can wait for.
+///
+/// Waiting is cancellable: a cancelled waiter throws `CancellationError` and stops waiting, while
+/// the producer and the other waiters are unaffected. The result is delivered once and kept, so a
+/// waiter that arrives after `fulfill` returns immediately.
+final class SharedOutcome<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var outcome: Result<Value, any Error>?
+    private var waiters: [UUID: CheckedContinuation<Value, any Error>] = [:]
+
+    func fulfill(_ result: Result<Value, any Error>) {
+        lock.lock()
+        guard outcome == nil else {
+            lock.unlock()
+            return
+        }
+        outcome = result
+        let pending = waiters
+        waiters.removeAll()
+        lock.unlock()
+        for continuation in pending.values {
+            continuation.resume(with: result)
+        }
+    }
+
+    func value() async throws -> Value {
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                if let outcome {
+                    lock.unlock()
+                    continuation.resume(with: outcome)
+                    return
+                }
+                // The cancellation handler may already have run and found no waiter to resume.
+                if Task.isCancelled {
+                    lock.unlock()
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                waiters[id] = continuation
+                lock.unlock()
+            }
+        } onCancel: {
+            lock.lock()
+            let continuation = waiters.removeValue(forKey: id)
+            lock.unlock()
+            continuation?.resume(throwing: CancellationError())
+        }
+    }
+}
+
 extension HTTPConnection {
     /// Quiesces the connection, closes it, and closes a parent UDP socket when this channel has one.
     static func closeConnection(_ channel: Channel) async {

@@ -82,9 +82,10 @@ func withTLSClient<T>(
     mode: TLSFixtureServer.Mode,
     preferred version: HTTPVersion,
     configuration: HTTPConnection.Configuration = uncheckedTLSConfiguration(),
+    maxConcurrentStreams: Int? = nil,
     _ body: (HTTPConnection, TLSFixtureServer) async throws -> T
 ) async throws -> T {
-    let server = try await TLSFixtureServer.bind(mode)
+    let server = try await TLSFixtureServer.bind(mode, maxConcurrentStreams: maxConcurrentStreams)
     do {
         let value = try await withClient(preferred: version, configuration: configuration) { client in
             try await body(client, server)

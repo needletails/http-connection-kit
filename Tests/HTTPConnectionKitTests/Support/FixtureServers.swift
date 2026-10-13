@@ -59,6 +59,60 @@ final class HTTP1FixtureServer {
     }
 }
 
+/// The HTTP/2 connection channels a fixture server has accepted.
+final class HTTP2ConnectionRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var channels: [any Channel] = []
+
+    func add(_ channel: any Channel) {
+        lock.lock()
+        channels.append(channel)
+        lock.unlock()
+        channel.closeFuture.whenComplete { [weak self] _ in
+            self?.remove(channel)
+        }
+    }
+
+    private func remove(_ channel: any Channel) {
+        lock.lock()
+        channels.removeAll { $0 === channel }
+        lock.unlock()
+    }
+
+    var active: [any Channel] {
+        lock.lock()
+        defer { lock.unlock() }
+        return channels
+    }
+}
+
+/// Completes a promise when the peer acknowledges a PING sent after a GOAWAY.
+///
+/// Frames on one connection are processed in order, so the ack proves the client has handled
+/// every frame written before the PING.
+final class PingAckObserver: ChannelInboundHandler {
+    typealias InboundIn = HTTP2Frame
+    typealias InboundOut = HTTP2Frame
+
+    private var pending: [EventLoopPromise<Void>] = []
+
+    func register(_ promise: EventLoopPromise<Void>) {
+        pending.append(promise)
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let frame = unwrapInboundIn(data)
+        if frame.streamID == .rootStream, case .ping(_, ack: true) = frame.payload {
+            let acked = pending
+            pending.removeAll()
+            for promise in acked {
+                promise.succeed(())
+            }
+        }
+        context.fireChannelRead(data)
+    }
+}
+
 /// HTTPS server that speaks only HTTP/1.1 or only HTTP/2.
 final class TLSFixtureServer {
     enum Mode: Sendable {
@@ -69,13 +123,42 @@ final class TLSFixtureServer {
     let port: Int
     let accepts: AcceptCounter
     let gates: FixtureGates
+    let http2Connections: HTTP2ConnectionRegistry
     private let channel: any Channel
 
     var hold: HoldGate { gates.hold }
 
+    /// Sends GOAWAY on every open HTTP/2 connection and returns once each client has processed it.
+    func sendGoAway() async throws {
+        for connection in http2Connections.active {
+            try await connection.eventLoop.flatSubmit { () -> EventLoopFuture<Void> in
+                do {
+                    let observer = try connection.pipeline.syncOperations.handler(type: PingAckObserver.self)
+                    let promise = connection.eventLoop.makePromise(of: Void.self)
+                    observer.register(promise)
+                    connection.write(
+                        HTTP2Frame(
+                            streamID: .rootStream,
+                            payload: .goAway(lastStreamID: .maxID, errorCode: .noError, opaqueData: nil)
+                        ),
+                        promise: nil
+                    )
+                    connection.writeAndFlush(
+                        HTTP2Frame(streamID: .rootStream, payload: .ping(HTTP2PingData(withInteger: 1), ack: false)),
+                        promise: nil
+                    )
+                    return promise.futureResult
+                } catch {
+                    return connection.eventLoop.makeFailedFuture(error)
+                }
+            }.get()
+        }
+    }
+
     static func bind(
         _ mode: Mode,
-        requireClientCertificate: Bool = false
+        requireClientCertificate: Bool = false,
+        maxConcurrentStreams: Int? = nil
     ) async throws -> TLSFixtureServer {
         let material = LocalTLSMaterial.shared
         var tls = TLSConfiguration.makeServerConfiguration(
@@ -91,6 +174,7 @@ final class TLSFixtureServer {
         let context = try NIOSSLContext(configuration: tls)
         let accepts = AcceptCounter()
         let gates = FixtureGates()
+        let registry = HTTP2ConnectionRegistry()
 
         let channel = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
@@ -107,6 +191,12 @@ final class TLSFixtureServer {
                     case .http2:
                         var connection = NIOHTTP2Handler.ConnectionConfiguration()
                         connection.targetWindowSize = 1_048_576
+                        if let maxConcurrentStreams {
+                            connection.initialSettings = [
+                                HTTP2Setting(parameter: .maxConcurrentStreams, value: maxConcurrentStreams),
+                                HTTP2Setting(parameter: .maxHeaderListSize, value: 80 * 1024),
+                            ]
+                        }
                         var stream = NIOHTTP2Handler.StreamConfiguration()
                         stream.targetWindowSize = 1_048_576
                         _ = try channel.pipeline.syncOperations.configureHTTP2Pipeline(
@@ -124,15 +214,22 @@ final class TLSFixtureServer {
                                 }
                             }
                         )
+                        try channel.pipeline.syncOperations.addHandler(PingAckObserver())
+                        registry.add(channel)
                     }
                 }
             }
             .bind(host: "127.0.0.1", port: 0)
             .get()
-        return try TLSFixtureServer(channel: channel, accepts: accepts, gates: gates)
+        return try TLSFixtureServer(channel: channel, accepts: accepts, gates: gates, registry: registry)
     }
 
-    private init(channel: any Channel, accepts: AcceptCounter, gates: FixtureGates) throws {
+    private init(
+        channel: any Channel,
+        accepts: AcceptCounter,
+        gates: FixtureGates,
+        registry: HTTP2ConnectionRegistry
+    ) throws {
         guard let port = channel.localAddress?.port else {
             throw FixtureServerError.missingPort
         }
@@ -140,6 +237,7 @@ final class TLSFixtureServer {
         self.port = port
         self.accepts = accepts
         self.gates = gates
+        self.http2Connections = registry
     }
 
     func url(_ path: String) -> URL {

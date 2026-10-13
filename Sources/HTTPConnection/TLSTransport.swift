@@ -23,20 +23,29 @@ final class NegotiationSlot: @unchecked Sendable {
     private var handler: NIOTypedApplicationProtocolNegotiationHandler<HTTPVersion>?
     private let http1: HTTPVersion
     private let decompressionLimit: NIOHTTPDecompression.DecompressionLimit?
+    /// Filled by the HTTP/2 pipeline when ALPN selects `h2`.
+    let http2Peer: HTTP2PeerState
 
-    init(http1: HTTPVersion, decompressionLimit: NIOHTTPDecompression.DecompressionLimit? = nil) {
+    init(
+        http1: HTTPVersion,
+        decompressionLimit: NIOHTTPDecompression.DecompressionLimit? = nil,
+        http2Peer: HTTP2PeerState
+    ) {
         self.http1 = http1
         self.decompressionLimit = decompressionLimit
+        self.http2Peer = http2Peer
     }
 
     /// Adds the negotiation handler on the channel's event loop and keeps it after ALPN completes.
     func install(on channel: Channel) -> EventLoopFuture<Void> {
         let http1 = self.http1
         let decompressionLimit = self.decompressionLimit
+        let http2Peer = self.http2Peer
         return channel.eventLoop.makeCompletedFuture {
             let handler = HTTPConnection.protocolNegotiationHandler(
                 http1: http1,
-                decompressionLimit: decompressionLimit
+                decompressionLimit: decompressionLimit,
+                http2Peer: http2Peer
             )
             self.lock.lock()
             self.handler = handler
@@ -59,7 +68,8 @@ extension HTTPConnection {
     /// A missing ALPN token is HTTP/1. Servers that do not negotiate still speak HTTP/1.1.
     static func protocolNegotiationHandler(
         http1: HTTPVersion,
-        decompressionLimit: NIOHTTPDecompression.DecompressionLimit?
+        decompressionLimit: NIOHTTPDecompression.DecompressionLimit?,
+        http2Peer: HTTP2PeerState
     ) -> NIOTypedApplicationProtocolNegotiationHandler<HTTPVersion> {
         NIOTypedApplicationProtocolNegotiationHandler { result, channel in
             let negotiated: HTTPVersion
@@ -71,7 +81,7 @@ extension HTTPConnection {
             }
             let configured: EventLoopFuture<Void>
             if negotiated == .http2 {
-                configured = Self.installHTTP2Handlers(on: channel, enableTLS: true)
+                configured = Self.installHTTP2Handlers(on: channel, enableTLS: true, peerState: http2Peer)
             } else {
                 configured = Self.installHTTP1Handlers(on: channel, decompressionLimit: decompressionLimit)
             }
@@ -152,7 +162,14 @@ extension HTTPConnection {
     }
 
     /// Client HTTP/2 pipeline. Inbound streams are translated back to HTTP/1 parts.
-    static func installHTTP2Handlers(on channel: Channel, enableTLS: Bool) -> EventLoopFuture<Void> {
+    ///
+    /// `peerState` is filled from the connection-level SETTINGS and GOAWAY frames so the pool can
+    /// tell when this connection is saturated or retiring.
+    static func installHTTP2Handlers(
+        on channel: Channel,
+        enableTLS: Bool,
+        peerState: HTTP2PeerState
+    ) -> EventLoopFuture<Void> {
         var connection = NIOHTTP2Handler.ConnectionConfiguration()
         connection.initialSettings = [
             HTTP2Setting(parameter: .maxConcurrentStreams, value: 100),
@@ -176,7 +193,10 @@ extension HTTPConnection {
                     )
                 }
             }
-        ).map { _ in () }
+        ).flatMapThrowing { _ in
+            // Behind NIOHTTP2Handler, which forwards root-stream frames after applying them.
+            try channel.pipeline.syncOperations.addHandler(HTTP2PeerStateObserver(state: peerState))
+        }
     }
 
     /// SNI carries a hostname. An IP literal is not a legal server name, and NIOSSL rejects it.

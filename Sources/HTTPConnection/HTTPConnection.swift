@@ -9,6 +9,9 @@ import Foundation
 import HTTPTypes
 import NIOCore
 import NIOHTTP1
+#if canImport(Network)
+import Network
+#endif
 
 /// A long-lived HTTP client.
 ///
@@ -26,8 +29,21 @@ public actor HTTPConnection: Request {
     let configurationValidationError: Configuration.ValidationError?
     let authenticationSession: (any HTTPAuthenticationSession)?
     var connections: [ObjectIdentifier: LiveConnection] = [:]
-    /// Origins whose QUIC handshake failed while TCP succeeded. Later requests on this client use TCP.
+    /// Origins whose QUIC handshake failed. Later requests on this client use TCP until the
+    /// network path changes.
     var quicDeniedOrigins: Set<Origin> = []
+    /// QUIC handshakes in flight, one per origin. Requests share the attempt instead of racing their own.
+    var quicAttempts: [Origin: QUICAttempt] = [:]
+    /// Connections being opened for an origin that may yield a multiplexed connection. Requests
+    /// arriving meanwhile wait for the opener and then reuse its connection.
+    var pendingOpens: [Origin: SharedOutcome<Void>] = [:]
+    /// TLS origins that selected HTTP/1. Requests to them do not wait on each other's opens.
+    var singleStreamOrigins: Set<Origin> = []
+    #if canImport(Network)
+    /// Started on the first QUIC denial. A path change clears `quicDeniedOrigins`.
+    private var pathMonitor: NWPathMonitor?
+    private var pathSignature: String?
+    #endif
 
     /// Creates a client using the protocol negotiation policy in `configuration`.
     public init(configuration: Configuration = Configuration()) {
@@ -61,18 +77,76 @@ public actor HTTPConnection: Request {
         for connection in connections.values {
             connection.channel.close(promise: nil)
         }
+        for attempt in quicAttempts.values {
+            attempt.task?.cancel()
+        }
+        #if canImport(Network)
+        pathMonitor?.cancel()
+        #endif
     }
 
     /// Closes every connection this client still holds.
     ///
-    /// In-flight request streams fail and close with their connection. Call this when the client is finished.
+    /// In-flight request streams fail and close with their connection. QUIC handshakes still in
+    /// flight are cancelled. Call this when the client is finished.
     public func shutdown() async {
+        let attempts = quicAttempts.values
+        quicAttempts.removeAll()
+        for attempt in attempts {
+            attempt.task?.cancel()
+        }
+        #if canImport(Network)
+        pathMonitor?.cancel()
+        pathMonitor = nil
+        pathSignature = nil
+        #endif
         let open = connections.values.map(\.channel)
         connections.removeAll()
         for channel in open {
             await Self.closeConnection(channel)
         }
     }
+
+    /// Tells the client the device's network path changed.
+    ///
+    /// Origins that were pinned to TCP after a failed QUIC handshake are allowed to try QUIC again.
+    /// Apple platforms call this from `NWPathMonitor`. Android hosts should call it from a
+    /// `ConnectivityManager.NetworkCallback`, which this package cannot observe directly.
+    public func networkPathDidChange() {
+        quicDeniedOrigins.removeAll()
+    }
+
+    /// Remembers that QUIC failed for an origin and starts watching for a path change.
+    func denyQUIC(for origin: Origin) {
+        quicDeniedOrigins.insert(origin)
+        #if canImport(Network)
+        startPathMonitorIfNeeded()
+        #endif
+    }
+
+    #if canImport(Network)
+    private func startPathMonitorIfNeeded() {
+        guard pathMonitor == nil else {
+            return
+        }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            // The first update describes the current path and is the baseline, not a change.
+            let signature = "\(path.status)|\(path.availableInterfaces.map(\.name).sorted().joined(separator: ","))"
+            Task { await self?.pathUpdated(signature: signature) }
+        }
+        monitor.start(queue: DispatchQueue.global(qos: .utility))
+        pathMonitor = monitor
+    }
+
+    private func pathUpdated(signature: String) {
+        defer { pathSignature = signature }
+        guard let previous = pathSignature, previous != signature else {
+            return
+        }
+        networkPathDidChange()
+    }
+    #endif
 
     /// Sends one request and returns the collected response.
     ///

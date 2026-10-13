@@ -71,10 +71,39 @@ struct LiveConnection: Sendable {
     /// Set after a request on this connection hit its deadline. New requests skip it; the channel
     /// closes once `activeStreams` reaches zero.
     var isDraining = false
+    /// Peer SETTINGS and GOAWAY state. Nil for HTTP/3, whose stream credit is handled by QUIC.
+    var http2Peer: HTTP2PeerState?
 
     var negotiatedVersion: HTTPVersion {
         HTTPVersion(major: key.major, minor: key.minor)
     }
+
+    /// Whether the peer has told this connection to stop opening streams.
+    var isRetiring: Bool {
+        isDraining || (http2Peer?.goAwayReceived ?? false)
+    }
+
+    /// Whether one more stream fits under the peer's advertised limit.
+    var canAcceptStream: Bool {
+        guard !isRetiring else {
+            return false
+        }
+        if let limit = http2Peer?.maxConcurrentStreams {
+            return activeStreams < limit
+        }
+        return true
+    }
+}
+
+/// One QUIC handshake shared by every request to its origin.
+///
+/// The attempt outlives the request that started it. A request that already has a TCP connection
+/// does not wait for it; the pool adopts the HTTP/3 connection when the handshake completes.
+struct QUICAttempt: Sendable {
+    /// The HTTP/3 connection channel, or the handshake error.
+    let outcome = SharedOutcome<Channel>()
+    /// Set by the actor once the handshake task exists. Cancelled by `shutdown()`.
+    var task: Task<Void, Never>?
 }
 
 /// An origin whose QUIC handshake failed while TCP succeeded.

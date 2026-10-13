@@ -22,7 +22,7 @@ package enum HTTP3EventLoop {
 }
 #endif
 
-/// One side of the HTTP/3 race. Failures stay in `RaceFailures` because `Error` is not `Sendable`.
+/// One side of the HTTP/3 race.
 private enum TransportAttempt: Sendable {
     case quic(Channel)
     case tcp(Channel, HTTPVersion)
@@ -30,12 +30,15 @@ private enum TransportAttempt: Sendable {
     case tcpFailed
 }
 
+/// What the race hands back. A QUIC connection is already in the pool when it wins, because the
+/// shared attempt registers it before waking its waiters.
 private enum RaceDecision: Sendable {
     case quic(Channel)
-    case tcp(Channel, HTTPVersion, quicFailed: Bool)
+    case tcp(Channel, HTTPVersion)
     case failed
 }
 
+/// Holds the race errors because `Error` is not `Sendable` across the task group.
 private final class RaceFailures: @unchecked Sendable {
     private let lock = NSLock()
     private var tcp: Error?
@@ -65,6 +68,10 @@ extension HTTPConnection {
     ///
     /// HTTP/1 connections are not pooled. `executeThenClose` closes them, and a channel can be
     /// wrapped in `NIOAsyncChannel` only once.
+    ///
+    /// Requests that arrive while a connection to the same origin is being opened wait for that
+    /// open instead of starting their own, when the origin may produce a multiplexed connection.
+    /// A waiter that finds nothing to reuse afterwards opens its own connection.
     func connection(
         for components: RequestComponents,
         cancelTarget: CancelTarget
@@ -73,7 +80,29 @@ extension HTTPConnection {
             return (existing.channel, false, existing.negotiatedVersion)
         }
 
+        let origin = Origin(components)
+        let coalesce = mayMultiplex(components)
+        if coalesce, let pending = pendingOpens[origin] {
+            try await pending.value()
+            if let existing = reusableConnection(for: components) {
+                return (existing.channel, false, existing.negotiatedVersion)
+            }
+        }
+
+        let opening = SharedOutcome<Void>()
+        if coalesce {
+            pendingOpens[origin] = opening
+        }
+        defer {
+            if coalesce, pendingOpens[origin] === opening {
+                pendingOpens.removeValue(forKey: origin)
+            }
+            opening.fulfill(.success(()))
+        }
+
+        let http2Peer = HTTP2PeerState()
         let opened: (Channel, HTTPVersion)
+        var pooledByAttempt = false
         if configuration.protocols.requiredVersion == .http3 {
             if #available(anyAppleOS 26, *) {
                 opened = (
@@ -85,12 +114,14 @@ extension HTTPConnection {
             }
         } else if shouldRaceQUIC(components) {
             if #available(anyAppleOS 26, *) {
-                opened = try await raceQUIC(components, cancelTarget: cancelTarget)
+                let raced = try await raceQUIC(components, http2Peer: http2Peer, cancelTarget: cancelTarget)
+                opened = (raced.channel, raced.version)
+                pooledByAttempt = raced.pooled
             } else {
-                opened = try await openTCP(components, cancelTarget: cancelTarget)
+                opened = try await openTCP(components, http2Peer: http2Peer, cancelTarget: cancelTarget)
             }
         } else {
-            opened = try await openTCP(components, cancelTarget: cancelTarget)
+            opened = try await openTCP(components, http2Peer: http2Peer, cancelTarget: cancelTarget)
         }
 
         let channel = opened.0
@@ -101,42 +132,78 @@ extension HTTPConnection {
             await Self.closeConnection(channel)
             throw HTTPConnectionError.protocolNegotiationFailed
         }
+        if pooledByAttempt {
+            // Shared with every other waiter on the attempt, so it is never this request's to close.
+            return (channel, false, negotiated)
+        }
         if negotiated == .http2 || negotiated == .http3 {
-            let id = ObjectIdentifier(channel)
-            connections[id] = LiveConnection(
-                key: ConnectionKey(components: components, version: negotiated),
-                channel: channel,
-                lastUsedNanoseconds: DispatchTime.now().uptimeNanoseconds
-            )
-            channel.closeFuture.whenComplete { _ in
-                Task { await self.forget(id) }
-            }
+            register(channel, components: components, version: negotiated, http2Peer: http2Peer)
+        } else if components.enableTLS {
+            singleStreamOrigins.insert(origin)
         }
         return (channel, true, negotiated)
     }
 
-    /// Highest active HTTP/2 or HTTP/3 connection for this origin that is still within the cap.
+    /// Adds a multiplexed connection to the pool. Registering the same channel twice is a no-op.
+    func register(
+        _ channel: Channel,
+        components: RequestComponents,
+        version negotiated: HTTPVersion,
+        http2Peer: HTTP2PeerState?
+    ) {
+        let id = ObjectIdentifier(channel)
+        guard connections[id] == nil else {
+            return
+        }
+        connections[id] = LiveConnection(
+            key: ConnectionKey(components: components, version: negotiated),
+            channel: channel,
+            lastUsedNanoseconds: DispatchTime.now().uptimeNanoseconds,
+            http2Peer: negotiated == .http2 ? http2Peer : nil
+        )
+        channel.closeFuture.whenComplete { _ in
+            Task { await self.forget(id) }
+        }
+    }
+
+    /// Whether opening a connection to this origin can produce one that later requests share.
+    ///
+    /// Cleartext and an HTTP/1 cap never do. A TLS origin that already selected HTTP/1 is
+    /// remembered so its requests stop waiting on each other.
+    private func mayMultiplex(_ components: RequestComponents) -> Bool {
+        components.enableTLS
+            && version.major >= 2
+            && !singleStreamOrigins.contains(Origin(components))
+    }
+
+    /// Highest active HTTP/2 or HTTP/3 connection for this origin that is still within the cap
+    /// and can take another stream.
     private func reusableConnection(for components: RequestComponents) -> LiveConnection? {
         let cap = version
         let now = DispatchTime.now().uptimeNanoseconds
-        if let idleTimeout = configuration.pool.idleTimeout {
-            let limit = UInt64(max(idleTimeout.httpConnectionNanoseconds, 0))
-            let expired = connections.filter { _, connection in
-                connection.activeStreams == 0
-                    && now >= connection.lastUsedNanoseconds
-                    && now - connection.lastUsedNanoseconds >= limit
+        let idleLimit = configuration.pool.idleTimeout.map { UInt64(max($0.httpConnectionNanoseconds, 0)) }
+        let expired = connections.filter { _, connection in
+            guard connection.activeStreams == 0 else {
+                return false
             }
-            for (id, connection) in expired {
-                connections.removeValue(forKey: id)
-                Self.discard(connection.channel)
+            if connection.isRetiring {
+                return true
             }
+            guard let idleLimit else {
+                return false
+            }
+            return now >= connection.lastUsedNanoseconds && now - connection.lastUsedNanoseconds >= idleLimit
+        }
+        for (id, connection) in expired {
+            connections.removeValue(forKey: id)
+            Self.discard(connection.channel)
         }
         guard let selected = connections
             .filter({ _, connection in
                 connection.key.host == components.host
                     && connection.key.port == components.port
                     && connection.key.enableTLS == components.enableTLS
-                    && !connection.isDraining
+                    && connection.canAcceptStream
                     && connection.channel.isActive
                     && (connection.negotiatedVersion == .http2 || connection.negotiatedVersion == .http3)
                     && Self.withinCap(connection.negotiatedVersion, cap: cap)
@@ -156,10 +223,12 @@ extension HTTPConnection {
         return selected.value
     }
 
-    /// HTTP/3 runs beside TCP only for HTTPS when the cap allows it and this origin has not failed QUIC.
+    /// HTTP/3 runs beside TCP only for HTTPS when the cap allows it, no lower version is required,
+    /// and this origin has not failed QUIC.
     private func shouldRaceQUIC(_ components: RequestComponents) -> Bool {
         components.enableTLS
             && version.major >= 3
+            && configuration.protocols.requiredVersion == nil
             && configuration.tls.clientIdentity == nil
             && configuration.tls.trustRoots.usesSystemDefault
             && !quicDeniedOrigins.contains(Origin(components))
@@ -186,14 +255,14 @@ extension HTTPConnection {
         connections[id]?.activeStreams += 1
     }
 
-    /// Records a request stream that finished. A draining connection closes with its last stream.
+    /// Records a request stream that finished. A draining or GOAWAY'd connection closes with its last stream.
     func streamClosed(on id: ObjectIdentifier) {
         guard var connection = connections[id] else {
             return
         }
         connection.activeStreams = max(connection.activeStreams - 1, 0)
         connections[id] = connection
-        if connection.isDraining, connection.activeStreams == 0 {
+        if connection.isRetiring, connection.activeStreams == 0 {
             connections.removeValue(forKey: id)
             Self.discard(connection.channel)
         }
@@ -216,22 +285,25 @@ extension HTTPConnection {
         connections[id] = connection
     }
 
-    /// Waits for the QUIC handshake to succeed or fail. TCP is already connecting.
+    /// Returns the first transport that is ready. TCP is already connecting.
     ///
-    /// A completed QUIC handshake wins and the TCP connection is closed. A failed QUIC handshake
-    /// leaves the TCP connection, which has already selected HTTP/2 or HTTP/1.1. That origin then
-    /// stays on TCP for the life of this client.
+    /// The QUIC handshake is one shared attempt per origin and is not waited for past the TCP
+    /// connection. When TCP is ready first the request uses it and the attempt keeps running; the
+    /// pool adopts the HTTP/3 connection when the handshake completes, so the next request
+    /// upgrades. When QUIC completes first the TCP connect is cancelled. A failed handshake denies
+    /// the origin until the network path changes.
     @available(anyAppleOS 26, *)
     private func raceQUIC(
         _ components: RequestComponents,
+        http2Peer: HTTP2PeerState,
         cancelTarget: CancelTarget
-    ) async throws -> (Channel, HTTPVersion) {
+    ) async throws -> (channel: Channel, version: HTTPVersion, pooled: Bool) {
+        let attempt = quicAttempt(for: components)
         let failures = RaceFailures()
         let decision = await withTaskGroup(of: TransportAttempt.self) { group in
             group.addTask {
                 do {
-                    let channel = try await self.openQUIC(components, cancelTarget: cancelTarget)
-                    return .quic(channel)
+                    return .quic(try await attempt.outcome.value())
                 } catch is CancellationError {
                     return .quicFailed
                 } catch {
@@ -241,7 +313,7 @@ extension HTTPConnection {
             }
             group.addTask {
                 do {
-                    let opened = try await self.openTCP(components, cancelTarget: cancelTarget)
+                    let opened = try await self.openTCP(components, http2Peer: http2Peer, cancelTarget: cancelTarget)
                     return .tcp(opened.0, opened.1)
                 } catch is CancellationError {
                     return .tcpFailed
@@ -251,63 +323,113 @@ extension HTTPConnection {
                 }
             }
 
-            var quic: Channel?
-            var tcp: (Channel, HTTPVersion)?
+            var decision = RaceDecision.failed
             var quicFailed = false
             var tcpFailed = false
-            while let attempt = await group.next() {
-                switch attempt {
+            while let next = await group.next() {
+                switch next {
                 case .quic(let channel):
-                    quic = channel
+                    decision = .quic(channel)
                 case .tcp(let channel, let negotiated):
-                    tcp = (channel, negotiated)
+                    decision = .tcp(channel, negotiated)
                 case .quicFailed:
                     quicFailed = true
                 case .tcpFailed:
                     tcpFailed = true
                 }
-                if quic != nil || (quicFailed && (tcp != nil || tcpFailed)) {
-                    break
+                if case .failed = decision, !(quicFailed && tcpFailed) {
+                    continue
                 }
+                break
             }
+            // Cancelling the QUIC waiter stops this request from waiting; the attempt itself continues.
             group.cancelAll()
-            while let attempt = await group.next() {
-                switch attempt {
-                case .quic(let channel):
-                    Self.discard(channel)
+            while let next = await group.next() {
+                switch next {
                 case .tcp(let channel, _):
                     Self.discard(channel)
-                case .quicFailed, .tcpFailed:
+                case .quic, .quicFailed, .tcpFailed:
+                    // A QUIC connection that lands here is already pooled by its attempt.
                     break
                 }
             }
-
-            if let quic {
-                if let tcp {
-                    Self.discard(tcp.0)
-                }
-                return RaceDecision.quic(quic)
-            }
-            if quicFailed, let tcp {
-                return .tcp(tcp.0, tcp.1, quicFailed: true)
-            }
-            return .failed
+            return decision
         }
 
         switch decision {
         case .quic(let channel):
-            return (channel, .http3)
-        case .tcp(let channel, let negotiated, let quicFailed):
-            if quicFailed {
-                quicDeniedOrigins.insert(Origin(components))
-            }
-            return (channel, negotiated)
+            return (channel, .http3, true)
+        case .tcp(let channel, let negotiated):
+            return (channel, negotiated, false)
         case .failed:
             if Task.isCancelled {
                 throw CancellationError()
             }
             throw failures.preferred ?? HTTPConnectionError.invalidRequest
         }
+    }
+
+    /// The QUIC handshake in flight for this origin, started if there is none.
+    ///
+    /// The attempt belongs to the client, not to the request that started it. Only `shutdown()`
+    /// cancels it, so a request that gives up on waiting leaves the handshake running.
+    @available(anyAppleOS 26, *)
+    private func quicAttempt(for components: RequestComponents) -> QUICAttempt {
+        let origin = Origin(components)
+        if let existing = quicAttempts[origin] {
+            return existing
+        }
+        var attempt = QUICAttempt()
+        let outcome = attempt.outcome
+        attempt.task = Task {
+            let target = CancelTarget()
+            let result: Result<Channel, any Error>
+            do {
+                let channel = try await withTaskCancellationHandler {
+                    try await self.openQUIC(components, cancelTarget: target)
+                } onCancel: {
+                    target.close()
+                }
+                result = .success(channel)
+            } catch {
+                result = .failure(error)
+            }
+            // The task inherits the actor, so this is a direct call once the handshake has settled.
+            self.quicAttemptFinished(outcome, origin: origin, components: components, result: result)
+        }
+        quicAttempts[origin] = attempt
+        return attempt
+    }
+
+    /// Pools a completed handshake or denies the origin, then wakes the attempt's waiters.
+    ///
+    /// The connection is registered before the waiters wake so a request that receives it finds
+    /// it in the pool and never treats it as its own to close.
+    private func quicAttemptFinished(
+        _ outcome: SharedOutcome<Channel>,
+        origin: Origin,
+        components: RequestComponents,
+        result: Result<Channel, any Error>
+    ) {
+        let current = quicAttempts[origin]?.outcome === outcome
+        if current {
+            quicAttempts.removeValue(forKey: origin)
+        }
+        switch result {
+        case .success(let channel):
+            guard current else {
+                // shutdown() dropped this attempt while the handshake was finishing.
+                Self.discard(channel)
+                outcome.fulfill(.failure(CancellationError()))
+                return
+            }
+            register(channel, components: components, version: .http3, http2Peer: nil)
+        case .failure(let error):
+            if current, !(error is CancellationError) {
+                denyQUIC(for: origin)
+            }
+        }
+        outcome.fulfill(result)
     }
 
     /// Opens a QUIC connection. The returned channel is the HTTP/3 connection, not the UDP socket.
@@ -321,11 +443,13 @@ extension HTTPConnection {
         // channel initializer stalls every datagram on that loop.
         _ = AndroidSystemTrustRoots.certificates
         #endif
-        let udp: Channel
         let channelOptions = configuration.channel
         let tls = configuration.tls
         let reuse = Self.socketEnabled(channelOptions.reuseLocalEndpoint)
         let udpBuffer = SocketOptionValue(channelOptions.udpBufferBytes)
+        // Both datagram bootstraps only expose a future-returning `connect`. `NIOTSDatagramConnectionBootstrap`
+        // has no async overload, and NIOPosix's async overload is `.get()` underneath. `resolveChannel`
+        // is used instead of `.get()` so a cancelled request stops waiting and closes a late channel.
         #if canImport(Network)
         let connected = NIOTSDatagramConnectionBootstrap(group: NIOTSEventLoopGroup.singleton)
             .connectTimeout(Self.timeAmount(configuration.timeouts.connect))
@@ -344,6 +468,13 @@ extension HTTPConnection {
             }
             .connect(host: components.host, port: components.port)
         #else
+        // `DatagramBootstrap.connect(host:port:)` resolves with a blocking `getaddrinfo` on the
+        // caller, which here is a cooperative-pool thread. Resolve on the NIO thread pool instead.
+        let host = components.host
+        let port = components.port
+        let address = try await NIOThreadPool.singleton.runIfActive {
+            try SocketAddress.makeAddressResolvingHost(host, port: port)
+        }
         let connected = DatagramBootstrap(group: HTTP3EventLoop.shared)
             .channelOption(.socketOption(.so_reuseaddr), value: reuse)
             .channelOption(.socketOption(.so_rcvbuf), value: udpBuffer)
@@ -362,9 +493,9 @@ extension HTTPConnection {
                     )
                 }
             }
-            .connect(host: components.host, port: components.port)
+            .connect(to: address)
         #endif
-        udp = try await Self.resolveChannel(connected)
+        let udp = try await Self.resolveChannel(connected)
         do {
             let connection = try await Self.openHTTP3Connection(on: udp, serverHostname: components.host)
             if cancelTarget.watch(connection) {
@@ -383,6 +514,7 @@ extension HTTPConnection {
     /// cap is HTTP/2 or HTTP/3.
     private func openTCP(
         _ components: RequestComponents,
+        http2Peer: HTTP2PeerState,
         cancelTarget: CancelTarget
     ) async throws -> (Channel, HTTPVersion) {
         let offerHTTP2 = components.enableTLS && version.major >= 2
@@ -391,7 +523,9 @@ extension HTTPConnection {
             configuration.decompression.isEnabled
             ? .ratio(configuration.decompression.ratioLimit)
             : nil
-        let negotiation = offerHTTP2 ? NegotiationSlot(http1: http1, decompressionLimit: decompressionLimit) : nil
+        let negotiation = offerHTTP2
+            ? NegotiationSlot(http1: http1, decompressionLimit: decompressionLimit, http2Peer: http2Peer)
+            : nil
         let channelOptions = configuration.channel
         let tls = configuration.tls
         let connectTimeout = Self.timeAmount(configuration.timeouts.connect)

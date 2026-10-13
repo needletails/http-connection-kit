@@ -199,6 +199,63 @@ struct HTTP2ClientTests {
         }
     }
 
+    @Test func concurrentFirstRequestsShareOneConnection() async throws {
+        try await withTLSClient(mode: .http2, preferred: .http2) { client, server in
+            let url = server.url("/echo")
+            try await withThrowingTaskGroup(of: Int.self) { group in
+                for _ in 0..<8 {
+                    group.addTask {
+                        try await client.request(method: .get, url: url, headers: [:], body: nil).head.status.code
+                    }
+                }
+                for try await status in group {
+                    #expect(status == 200)
+                }
+            }
+            #expect(server.accepts.count == 1)
+        }
+    }
+
+    @Test func aSaturatedConnectionOpensAnotherInsteadOfQueueing() async throws {
+        try await withTLSClient(mode: .http2, preferred: .http2, maxConcurrentStreams: 1) { client, server in
+            // The drip stream holds the only slot the peer allows on the first connection.
+            let streamed = try await client.requestStream(method: .get, url: server.url("/drip"))
+            var iterator = streamed.body.makeAsyncIterator()
+            #expect(try await iterator.next() == Data("HELLO".utf8))
+            await server.gates.drip.wait()
+            #expect(server.accepts.count == 1)
+
+            // Without the peer limit this would queue behind the drip stream inside NIOHTTP2.
+            let response = try await client.request(
+                method: .get,
+                url: server.url("/echo"),
+                headers: [:],
+                body: nil,
+                options: .init(timeout: .seconds(5))
+            )
+            #expect(response.head.status.code == 200)
+            #expect(server.accepts.count == 2)
+
+            await server.gates.dripRelease.signal()
+            #expect(try await iterator.next() == Data("WORLD".utf8))
+            #expect(try await iterator.next() == nil)
+        }
+    }
+
+    @Test func aConnectionThatReceivedGoAwayIsNotReused() async throws {
+        try await withTLSClient(mode: .http2, preferred: .http2) { client, server in
+            let first = try await client.request(method: .get, url: server.url("/echo"), headers: [:], body: nil)
+            #expect(first.head.status.code == 200)
+            #expect(server.accepts.count == 1)
+
+            try await server.sendGoAway()
+
+            let second = try await client.request(method: .get, url: server.url("/echo"), headers: [:], body: nil)
+            #expect(second.head.status.code == 200)
+            #expect(server.accepts.count == 2)
+        }
+    }
+
     @Test func anErrorStatusDoesNotDrainTheConnection() async throws {
         try await withTLSClient(mode: .http2, preferred: .http2) { client, server in
             let failed = try await client.request(method: .get, url: server.url("/status/503"), headers: [:], body: nil)

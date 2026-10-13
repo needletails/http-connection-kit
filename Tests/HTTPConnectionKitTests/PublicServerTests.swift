@@ -52,22 +52,32 @@ struct PublicServerTests {
         #expect(http == "http/3" || http == "http/2")
     }
 
+    /// Requires HTTP/3 so the first request cannot land on TCP. Under the default policy the
+    /// first request uses whichever transport is ready first and the pool upgrades to HTTP/3
+    /// afterwards, which `cloudflareTraceUsesHTTP3WhenQUICConnects` covers.
     @Test func cloudflareQUICPageArrivesOverHTTP3() async throws {
         try await requireTCP(host: "cloudflare-quic.com")
         var configuration = HTTPConnection.Configuration()
+        configuration.protocols = .require(.http3)
         configuration.tls.minimumVersion = .tlsv13
         configuration.channel.quicIdleTimeout = .seconds(8)
-        try await withClient(preferred: .http3, configuration: configuration) { client in
-            let response = try await client.request(
+        let client = HTTPConnection(configuration: configuration)
+        let response: HCKResponse
+        do {
+            response = try await client.request(
                 method: .get,
                 url: URL(string: "https://cloudflare-quic.com/")!,
                 headers: [:],
                 body: nil
             )
-            #expect(response.head.status.code == 200)
-            let page = String(decoding: try #require(response.body), as: UTF8.self)
-            #expect(page.contains("your browser used <strong>HTTP/3</strong>"))
+        } catch {
+            await client.shutdown()
+            throw error
         }
+        await client.shutdown()
+        #expect(response.head.status.code == 200)
+        let page = String(decoding: try #require(response.body), as: UTF8.self)
+        #expect(page.contains("your browser used <strong>HTTP/3</strong>"))
     }
 
     private func cloudflareTrace(
