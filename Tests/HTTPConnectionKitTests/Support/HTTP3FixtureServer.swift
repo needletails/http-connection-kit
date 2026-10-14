@@ -107,7 +107,7 @@ final class HTTP3FixtureServer {
                     try channel.pipeline.syncOperations.addHandler(handler)
                 }
             }
-            .bind(host: "127.0.0.1", port: 0)
+            .bind(to: try loopbackSocketAddress())
             .get()
         guard let port = channel.localAddress?.port else {
             throw FixtureServerError.missingPort

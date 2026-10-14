@@ -232,4 +232,6 @@ jobs:
           adb shell settings put global window_animation_scale 0
           adb shell settings put global transition_animation_scale 0
           adb shell settings put global animator_duration_scale 0
-          skip android test --plain --swift-version 6.4.0 --arch x86_64 --android-connect-timeout 60
+          # The emulator has two cores. Parallel local handshakes miss the 10s connect timeout.
+          skip android test --plain --swift-version 6.4.0 --arch x86_64 --android-connect-timeout 60 \
+            --env SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH=1

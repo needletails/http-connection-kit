@@ -469,11 +469,17 @@ extension HTTPConnection {
             .connect(host: components.host, port: components.port)
         #else
         // `DatagramBootstrap.connect(host:port:)` resolves with a blocking `getaddrinfo` on the
-        // caller, which here is a cooperative-pool thread. Resolve on the NIO thread pool instead.
+        // caller, which here is a cooperative-pool thread. An IP literal never asks netd.
+        // Hostnames resolve on the NIO thread pool instead.
         let host = components.host
         let port = components.port
-        let address = try await NIOThreadPool.singleton.runIfActive {
-            try SocketAddress.makeAddressResolvingHost(host, port: port)
+        let address: SocketAddress
+        if let literal = Self.literalAddress(host: host, port: port) {
+            address = literal
+        } else {
+            address = try await NIOThreadPool.singleton.runIfActive {
+                try SocketAddress.makeAddressResolvingHost(host, port: port)
+            }
         }
         let connected = DatagramBootstrap(group: HTTP3EventLoop.shared)
             .channelOption(.socketOption(.so_reuseaddr), value: reuse)
@@ -586,27 +592,34 @@ extension HTTPConnection {
             channel = try await Self.resolveChannel(bootstrap.connect(host: components.host, port: components.port))
         }
         #else
-        channel = try await Self.resolveChannel(
-            ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-                .channelOption(.socketOption(.so_reuseaddr), value: reuse)
-                .channelOption(.tcpOption(.tcp_nodelay), value: noDelay)
-                .channelOption(.socketOption(.so_keepalive), value: keepAlive)
-                .channelOption(.allowRemoteHalfClosure, value: true)
-                .channelOption(.writeBufferWaterMark, value: writeBuffer)
-                .connectTimeout(connectTimeout)
-                .channelInitializer { channel in
-                    Self.installTCPHandlers(
-                        on: channel,
-                        serverHostname: components.host,
-                        enableTLS: components.enableTLS,
-                        negotiateTLSInPipeline: true,
-                        tls: tls,
-                        negotiation: negotiation,
-                        decompressionLimit: decompressionLimit
-                    )
-                }
-                .connect(host: components.host, port: components.port)
-        )
+        let bootstrap = ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .channelOption(.socketOption(.so_reuseaddr), value: reuse)
+            .channelOption(.tcpOption(.tcp_nodelay), value: noDelay)
+            .channelOption(.socketOption(.so_keepalive), value: keepAlive)
+            .channelOption(.allowRemoteHalfClosure, value: true)
+            .channelOption(.writeBufferWaterMark, value: writeBuffer)
+            .connectTimeout(connectTimeout)
+            .channelInitializer { channel in
+                Self.installTCPHandlers(
+                    on: channel,
+                    serverHostname: components.host,
+                    enableTLS: components.enableTLS,
+                    negotiateTLSInPipeline: true,
+                    tls: tls,
+                    negotiation: negotiation,
+                    decompressionLimit: decompressionLimit
+                )
+            }
+        // Android routes `getaddrinfo`, including `127.0.0.1`, through netd. A parallel test
+        // run fills that queue and the request deadline fires before the socket exists.
+        // Hostnames still use Happy Eyeballs.
+        let connecting: EventLoopFuture<Channel>
+        if let address = Self.literalAddress(host: components.host, port: components.port) {
+            connecting = bootstrap.connect(to: address)
+        } else {
+            connecting = bootstrap.connect(host: components.host, port: components.port)
+        }
+        channel = try await Self.resolveChannel(connecting)
         #endif
 
         do {
@@ -645,5 +658,10 @@ extension HTTPConnection {
 
     private static func socketEnabled(_ enabled: Bool) -> SocketOptionValue {
         SocketOptionValue(enabled ? 1 : 0)
+    }
+
+    /// `nil` when `host` is a name and still needs DNS.
+    private static func literalAddress(host: String, port: Int) -> SocketAddress? {
+        try? SocketAddress(ipAddress: host, port: port)
     }
 }

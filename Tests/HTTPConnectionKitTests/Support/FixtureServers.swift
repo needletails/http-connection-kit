@@ -35,7 +35,7 @@ final class HTTP1FixtureServer {
                     try channel.pipeline.syncOperations.addHandler(FixtureHTTPHandler(gates: gates))
                 }
             }
-            .bind(host: "127.0.0.1", port: 0)
+            .bind(to: try loopbackSocketAddress())
             .get()
         return try HTTP1FixtureServer(channel: channel, accepts: accepts, gates: gates)
     }
@@ -219,7 +219,7 @@ final class TLSFixtureServer {
                     }
                 }
             }
-            .bind(host: "127.0.0.1", port: 0)
+            .bind(to: try loopbackSocketAddress())
             .get()
         return try TLSFixtureServer(channel: channel, accepts: accepts, gates: gates, registry: registry)
     }
@@ -247,4 +247,9 @@ final class TLSFixtureServer {
     func stop() async {
         try? await channel.close().get()
     }
+}
+
+/// Loopback without `getaddrinfo`. Android sends that call, including numeric addresses, through netd.
+func loopbackSocketAddress() throws -> SocketAddress {
+    try SocketAddress(ipAddress: "127.0.0.1", port: 0)
 }
