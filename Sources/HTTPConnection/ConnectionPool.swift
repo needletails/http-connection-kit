@@ -447,11 +447,12 @@ extension HTTPConnection {
         let tls = configuration.tls
         let reuse = Self.socketEnabled(channelOptions.reuseLocalEndpoint)
         let udpBuffer = SocketOptionValue(channelOptions.udpBufferBytes)
+        let pinned = try await allowedAddresses(for: components)
         // Both datagram bootstraps only expose a future-returning `connect`. `NIOTSDatagramConnectionBootstrap`
         // has no async overload, and NIOPosix's async overload is `.get()` underneath. `resolveChannel`
         // is used instead of `.get()` so a cancelled request stops waiting and closes a late channel.
         #if canImport(Network)
-        let connected = NIOTSDatagramConnectionBootstrap(group: NIOTSEventLoopGroup.singleton)
+        let datagramBootstrap = NIOTSDatagramConnectionBootstrap(group: NIOTSEventLoopGroup.singleton)
             .connectTimeout(Self.timeAmount(configuration.timeouts.connect))
             .channelOption(NIOTSChannelOptions.waitForActivity, value: false)
             .channelOption(NIOTSChannelOptions.allowLocalEndpointReuse, value: channelOptions.reuseLocalEndpoint)
@@ -466,7 +467,11 @@ extension HTTPConnection {
                     )
                 }
             }
-            .connect(host: components.host, port: components.port)
+        let connected = if let address = pinned?.first {
+            datagramBootstrap.connect(to: address)
+        } else {
+            datagramBootstrap.connect(host: components.host, port: components.port)
+        }
         #else
         // `DatagramBootstrap.connect(host:port:)` resolves with a blocking `getaddrinfo` on the
         // caller, which here is a cooperative-pool thread. An IP literal never asks netd.
@@ -474,7 +479,9 @@ extension HTTPConnection {
         let host = components.host
         let port = components.port
         let address: SocketAddress
-        if let literal = Self.literalAddress(host: host, port: port) {
+        if let first = pinned?.first {
+            address = first
+        } else if let literal = Self.literalAddress(host: host, port: port) {
             address = literal
         } else {
             address = try await NIOThreadPool.singleton.runIfActive {
@@ -539,29 +546,35 @@ extension HTTPConnection {
         let noDelay = Self.socketEnabled(channelOptions.tcpNoDelay)
         let keepAlive = Self.socketEnabled(channelOptions.keepAlive)
         let reuse = Self.socketEnabled(channelOptions.reuseLocalEndpoint)
+        let pinned = try await allowedAddresses(for: components)
+        let posixBootstrap = {
+            ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+                .channelOption(.socketOption(.so_reuseaddr), value: reuse)
+                .channelOption(.tcpOption(.tcp_nodelay), value: noDelay)
+                .channelOption(.socketOption(.so_keepalive), value: keepAlive)
+                .channelOption(.allowRemoteHalfClosure, value: true)
+                .channelOption(.writeBufferWaterMark, value: writeBuffer)
+                .connectTimeout(connectTimeout)
+                .channelInitializer { channel in
+                    Self.installTCPHandlers(
+                        on: channel,
+                        serverHostname: components.host,
+                        enableTLS: components.enableTLS,
+                        negotiateTLSInPipeline: true,
+                        tls: tls,
+                        negotiation: negotiation,
+                        decompressionLimit: decompressionLimit
+                    )
+                }
+        }
         let channel: Channel
         #if canImport(Network)
-        if tls.clientIdentity != nil || !tls.trustRoots.usesSystemDefault {
+        // Network.framework resolves names itself, so filtered connections use NIOPosix and NIOSSL.
+        if let pinned {
+            channel = try await Self.resolveChannel(Self.connect(posixBootstrap(), to: pinned, components))
+        } else if tls.clientIdentity != nil || !tls.trustRoots.usesSystemDefault {
             channel = try await Self.resolveChannel(
-                ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-                    .channelOption(.socketOption(.so_reuseaddr), value: reuse)
-                    .channelOption(.tcpOption(.tcp_nodelay), value: noDelay)
-                    .channelOption(.socketOption(.so_keepalive), value: keepAlive)
-                    .channelOption(.allowRemoteHalfClosure, value: true)
-                    .channelOption(.writeBufferWaterMark, value: writeBuffer)
-                    .connectTimeout(connectTimeout)
-                    .channelInitializer { channel in
-                        Self.installTCPHandlers(
-                            on: channel,
-                            serverHostname: components.host,
-                            enableTLS: components.enableTLS,
-                            negotiateTLSInPipeline: true,
-                            tls: tls,
-                            negotiation: negotiation,
-                            decompressionLimit: decompressionLimit
-                        )
-                    }
-                    .connect(host: components.host, port: components.port)
+                posixBootstrap().connect(host: components.host, port: components.port)
             )
         } else {
             var bootstrap = NIOTSConnectionBootstrap(group: NIOTSEventLoopGroup.singleton)
@@ -592,29 +605,14 @@ extension HTTPConnection {
             channel = try await Self.resolveChannel(bootstrap.connect(host: components.host, port: components.port))
         }
         #else
-        let bootstrap = ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-            .channelOption(.socketOption(.so_reuseaddr), value: reuse)
-            .channelOption(.tcpOption(.tcp_nodelay), value: noDelay)
-            .channelOption(.socketOption(.so_keepalive), value: keepAlive)
-            .channelOption(.allowRemoteHalfClosure, value: true)
-            .channelOption(.writeBufferWaterMark, value: writeBuffer)
-            .connectTimeout(connectTimeout)
-            .channelInitializer { channel in
-                Self.installTCPHandlers(
-                    on: channel,
-                    serverHostname: components.host,
-                    enableTLS: components.enableTLS,
-                    negotiateTLSInPipeline: true,
-                    tls: tls,
-                    negotiation: negotiation,
-                    decompressionLimit: decompressionLimit
-                )
-            }
+        let bootstrap = posixBootstrap()
         // Android routes `getaddrinfo`, including `127.0.0.1`, through netd. A parallel test
         // run fills that queue and the request deadline fires before the socket exists.
         // Hostnames still use Happy Eyeballs.
         let connecting: EventLoopFuture<Channel>
-        if let address = Self.literalAddress(host: components.host, port: components.port) {
+        if let pinned {
+            connecting = Self.connect(bootstrap, to: pinned, components)
+        } else if let address = Self.literalAddress(host: components.host, port: components.port) {
             connecting = bootstrap.connect(to: address)
         } else {
             connecting = bootstrap.connect(host: components.host, port: components.port)
@@ -664,4 +662,61 @@ extension HTTPConnection {
     private static func literalAddress(host: String, port: Int) -> SocketAddress? {
         try? SocketAddress(ipAddress: host, port: port)
     }
+
+    /// The addresses a filtered connection may use, or `nil` when no filter is configured.
+    ///
+    /// Resolves once, refuses the whole host when any address is refused, and returns the checked
+    /// addresses so the connection is made to exactly those (a later DNS answer can't swap them).
+    private func allowedAddresses(for components: RequestComponents) async throws -> [SocketAddress]? {
+        guard let filter = configuration.addressFilter else { return nil }
+        let candidates: [SocketAddress]
+        if let literal = Self.literalAddress(host: components.host, port: components.port) {
+            candidates = [literal]
+        } else {
+            let resolver = NIORandomizedDNSResolver(loop: MultiThreadedEventLoopGroup.singleton.next())
+            let ipv4 = resolver.initiateAQuery(host: components.host, port: components.port)
+            let ipv6 = resolver.initiateAAAAQuery(host: components.host, port: components.port)
+            candidates = try await ipv6.get() + ipv4.get()
+        }
+        guard !candidates.isEmpty else { throw HTTPConnectionError.invalidRequest }
+        guard candidates.allSatisfy(filter.allows) else { throw HTTPConnectionError.addressNotAllowed }
+        return candidates
+    }
+
+    /// Connects to checked addresses only, keeping Happy Eyeballs across them.
+    private static func connect(
+        _ bootstrap: ClientBootstrap,
+        to addresses: [SocketAddress],
+        _ components: RequestComponents
+    ) -> EventLoopFuture<Channel> {
+        if addresses.count == 1 {
+            return bootstrap.connect(to: addresses[0])
+        }
+        return bootstrap
+            .resolver(PinnedResolver(addresses, loop: MultiThreadedEventLoopGroup.singleton.next()))
+            .connect(host: components.host, port: components.port)
+    }
+}
+
+/// Answers DNS queries with addresses that were already checked, so Happy Eyeballs can't reach others.
+private final class PinnedResolver: Resolver, Sendable {
+    private let ipv4: [SocketAddress]
+    private let ipv6: [SocketAddress]
+    private let loop: any EventLoop
+
+    init(_ addresses: [SocketAddress], loop: any EventLoop) {
+        self.ipv4 = addresses.filter { $0.protocol == .inet }
+        self.ipv6 = addresses.filter { $0.protocol == .inet6 }
+        self.loop = loop
+    }
+
+    func initiateAQuery(host: String, port: Int) -> EventLoopFuture<[SocketAddress]> {
+        loop.makeSucceededFuture(ipv4)
+    }
+
+    func initiateAAAAQuery(host: String, port: Int) -> EventLoopFuture<[SocketAddress]> {
+        loop.makeSucceededFuture(ipv6)
+    }
+
+    func cancelQueries() {}
 }

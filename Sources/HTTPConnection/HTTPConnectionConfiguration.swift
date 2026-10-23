@@ -47,6 +47,9 @@ extension HTTPConnection {
         public var authentication: (any HTTPAuthenticationProvider)?
         public var authenticationRefreshWindow: HTTPAuthenticationRefreshWindow
         public var maximumBufferedBodySize: Int
+        /// When set, every connection is limited to resolved addresses this filter allows. Nil
+        /// connects to whatever the host resolves to.
+        public var addressFilter: AddressFilter?
 
         public init(
             protocols: ProtocolPolicy = .default,
@@ -59,7 +62,8 @@ extension HTTPConnection {
             cookieJar: CookieJar = CookieJar(),
             authentication: (any HTTPAuthenticationProvider)? = nil,
             authenticationRefreshWindow: HTTPAuthenticationRefreshWindow = HTTPAuthenticationRefreshWindow(),
-            maximumBufferedBodySize: Int = 64 * 1024 * 1024
+            maximumBufferedBodySize: Int = 64 * 1024 * 1024,
+            addressFilter: AddressFilter? = nil
         ) {
             self.protocols = protocols
             self.tls = tls
@@ -72,6 +76,7 @@ extension HTTPConnection {
             self.authentication = authentication
             self.authenticationRefreshWindow = authenticationRefreshWindow
             self.maximumBufferedBodySize = maximumBufferedBodySize
+            self.addressFilter = addressFilter
         }
 
         public enum ProtocolVersion: Sendable, Equatable {

@@ -71,6 +71,8 @@ public enum HTTPConnectionError: Error, Equatable, Sendable {
     case authenticationRefreshLimitExceeded
     /// An authentication provider could not renew its credential.
     case authenticationFailed(any Error)
+    /// The host resolved to an address `Configuration.addressFilter` refuses, so no connection was opened.
+    case addressNotAllowed
 
     public static func == (lhs: Self, rhs: Self) -> Bool {
         switch (lhs, rhs) {
@@ -87,7 +89,8 @@ public enum HTTPConnectionError: Error, Equatable, Sendable {
              (.responseTooLarge, .responseTooLarge),
              (.timeout, .timeout),
              (.authenticationRefreshLimitExceeded, .authenticationRefreshLimitExceeded),
-             (.authenticationFailed, .authenticationFailed):
+             (.authenticationFailed, .authenticationFailed),
+             (.addressNotAllowed, .addressNotAllowed):
             true
         default:
             false

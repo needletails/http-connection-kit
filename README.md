@@ -66,6 +66,29 @@ Buffered responses are limited to 64 MiB and a request has a 60-second deadline 
 
 Credentials are scoped to the original scheme, host, and port across redirects. Bearer tokens are sent only over HTTPS unless `BearerTokenProvider.appliesTo` explicitly permits another URL. Authentication values and credential descriptions redact secrets. `Authorization` and body headers are removed when a redirect changes their security or request semantics.
 
+## Address filtering
+
+Set `addressFilter` to limit which addresses the client may connect to, for example when fetching URLs supplied by users. `publicInternetOnly` refuses loopback, private, carrier-grade NAT, link-local (including cloud metadata endpoints), multicast, documentation, benchmarking and other IANA special-purpose ranges, for IPv4 and IPv6. IPv4-mapped and NAT64 addresses are judged by the IPv4 address they carry, and Unix domain sockets are refused.
+
+```swift
+var configuration = HTTPConnection.Configuration()
+configuration.addressFilter = .publicInternetOnly
+configuration.redirects = .follow(maximum: 3)
+let fetcher = HTTPConnection(configuration: configuration)
+```
+
+A custom filter receives each resolved address with its port:
+
+```swift
+configuration.addressFilter = .init { address in
+    address.port == 443 && HTTPConnection.Configuration.AddressFilter.publicInternetOnly.allows(address)
+}
+```
+
+With a filter, the client resolves the host itself and fails with `HTTPConnectionError.addressNotAllowed` when **any** resolved address is refused. Otherwise it connects only to the addresses it checked, so a DNS answer that changes between the check and the connection can't redirect it. The filter applies to every connection, including redirect targets, over TCP and QUIC. On Apple platforms a filtered TCP connection uses the NIOPosix/NIOSSL transport instead of Network.framework, because Network.framework resolves names itself.
+
+The filter is an application-level guard. For untrusted fetching, also run the client where the network itself can't reach internal addresses.
+
 ## Bodies, forms, and streams
 
 `HTTPBody` is a pull `AsyncSequence` of `Data`. Upload accepts any `Sendable` `AsyncSequence` of `Data`. Download and `MultipartForm.stream()` return `HTTPBody`, so the producer waits until the caller takes the next chunk.
