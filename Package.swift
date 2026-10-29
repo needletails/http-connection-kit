@@ -21,18 +21,18 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-nio.git", from: "2.82.0"),
-        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.29.0"),
-        .package(url: "https://github.com/apple/swift-nio-http2.git", from: "1.36.0"),
-        .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.104.0"),
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.37.5"),
+        .package(url: "https://github.com/apple/swift-nio-http2.git", from: "1.46.0"),
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.16.2"),
         .package(url: "https://github.com/apple/swift-http-types.git", from: "1.8.0"),
-        .package(url: "https://github.com/apple/swift-nio-extras.git", from: "1.22.0"),
+        .package(url: "https://github.com/apple/swift-nio-extras.git", from: "1.35.2"),
         .package(url: "https://github.com/apple/swift-nio-transport-services.git", from: "1.28.0"),
-        .package(url: "https://github.com/apple/swift-nio-quic.git", .upToNextMinor(from: "0.5.1")),
+        .package(url: "https://github.com/apple/swift-nio-quic.git", .upToNextMinor(from: "0.6.0")),
         .package(url: "https://github.com/apple/swift-nio-http3.git", .upToNextMinor(from: "0.3.0")),
-        .package(url: "https://github.com/apple/swift-crypto.git", from: "5.0.0"),
-        .package(url: "https://github.com/apple/swift-certificates.git", from: "1.19.3"),
-        .package(url: "https://github.com/mihai8804858/swift-gzip.git", from: "1.2.1")
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "5.0.3"),
+        .package(url: "https://github.com/apple/swift-certificates.git", from: "1.21.1"),
+        .package(url: "https://github.com/mihai8804858/swift-gzip.git", from: "1.2.3")
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.

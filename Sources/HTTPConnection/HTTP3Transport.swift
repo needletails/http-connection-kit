@@ -66,18 +66,18 @@ extension HTTPConnection {
         }
         let peerVerification = tls.certificateVerification.quic
         let verifier = try Self.makeVerifier(peerVerification: peerVerification, eventLoop: channel.eventLoop)
-        let configuration = QUICConfiguration.client(
+        var configuration = QUICConfiguration.forClient(
             verificationConfiguration: .x509Certificates(trustRootsFilePath: nil),
-            applicationProtocols: ["h3"],
-            maxIdleTimeout: .nanoseconds(quicIdleTimeout.httpConnectionNanoseconds),
-            initialMaxData: 16_777_216,
-            initialMaxStreamDataBidiLocal: 1_048_576,
-            initialMaxStreamDataBidiRemote: 1_048_576,
-            initialMaxStreamDataUni: 1_048_576,
-            initialMaxStreamsBidi: 100,
-            initialMaxStreamsUni: 8,
-            peerCertificateVerification: peerVerification
+            applicationProtocols: ["h3"]
         )
+        configuration.maxIdleTimeout = .nanoseconds(quicIdleTimeout.httpConnectionNanoseconds)
+        configuration.initialMaxData = 16_777_216
+        configuration.initialMaxStreamDataBidiLocal = 1_048_576
+        configuration.initialMaxStreamDataBidiRemote = 1_048_576
+        configuration.initialMaxStreamDataUni = 1_048_576
+        configuration.initialMaxStreamsBidi = 100
+        configuration.initialMaxStreamsUni = 8
+        configuration.peerCertificateVerification = peerVerification
         let quicHandler = QUICHandler(
             channel: channel,
             quicConfiguration: configuration,

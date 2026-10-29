@@ -27,21 +27,22 @@ final class HTTP3FixtureServer {
 
     static func bind() async throws -> HTTP3FixtureServer {
         let material = LocalTLSMaterial.shared
-        let configuration = QUICConfiguration.server(
+        var mutableConfiguration = QUICConfiguration.forServer(
             serverName: "127.0.0.1",
             authenticationConfiguration: .x509Certificates(
                 certificateChainFilePath: material.certificatePath,
                 privateKeyFilePath: material.keyPath
             ),
-            applicationProtocols: ["h3"],
-            maxIdleTimeout: .seconds(30),
-            initialMaxData: 16_777_216,
-            initialMaxStreamDataBidiLocal: 1_048_576,
-            initialMaxStreamDataBidiRemote: 1_048_576,
-            initialMaxStreamDataUni: 1_048_576,
-            initialMaxStreamsBidi: 100,
-            initialMaxStreamsUni: 8
+            applicationProtocols: ["h3"]
         )
+        mutableConfiguration.maxIdleTimeout = .seconds(30)
+        mutableConfiguration.initialMaxData = 16_777_216
+        mutableConfiguration.initialMaxStreamDataBidiLocal = 1_048_576
+        mutableConfiguration.initialMaxStreamDataBidiRemote = 1_048_576
+        mutableConfiguration.initialMaxStreamDataUni = 1_048_576
+        mutableConfiguration.initialMaxStreamsBidi = 100
+        mutableConfiguration.initialMaxStreamsUni = 8
+        let configuration = mutableConfiguration
         let authenticator = try Authenticator(
             certificateFilePath: material.certificatePath,
             privateKeyFilePath: material.keyPath
