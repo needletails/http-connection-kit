@@ -623,7 +623,7 @@ extension HTTPConnection {
         do {
             let negotiated: HTTPVersion
             if let negotiation {
-                guard let result = negotiation.result() else {
+                guard let result = negotiation.result(for: channel) else {
                     throw HTTPConnectionError.invalidRequest
                 }
                 negotiated = try await Self.resolve(result) {

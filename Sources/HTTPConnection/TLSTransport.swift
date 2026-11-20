@@ -17,10 +17,14 @@ import Network
 import Security
 #endif
 
-/// Holds the ALPN handler. Its `Sendable` conformance is unavailable, so it stays inside this box.
+/// Holds the ALPN handlers. Their `Sendable` conformance is unavailable, so they stay inside this box.
+///
+/// One connect attempt can open several channels: NIO's Happy Eyeballs starts another candidate
+/// when the first takes longer than 250 ms, and runs the channel initializer on each. So the
+/// slot keeps a handler per channel, and answers for the one that connected.
 final class NegotiationSlot: @unchecked Sendable {
     private let lock = NSLock()
-    private var handler: NIOTypedApplicationProtocolNegotiationHandler<HTTPVersion>?
+    private var handlers: [ObjectIdentifier: NIOTypedApplicationProtocolNegotiationHandler<HTTPVersion>] = [:]
     private let http1: HTTPVersion
     private let decompressionLimit: NIOHTTPDecompression.DecompressionLimit?
     /// Filled by the HTTP/2 pipeline when ALPN selects `h2`.
@@ -48,16 +52,19 @@ final class NegotiationSlot: @unchecked Sendable {
                 http2Peer: http2Peer
             )
             self.lock.lock()
-            self.handler = handler
+            self.handlers[ObjectIdentifier(channel)] = handler
             self.lock.unlock()
             try channel.pipeline.syncOperations.addHandler(handler)
         }
     }
 
-    /// The protocol selected by ALPN. Nil until `install` has stored the handler.
-    func result() -> EventLoopFuture<HTTPVersion>? {
+    /// The protocol ALPN selected on `channel`, the one that connected. Nil if `install` never
+    /// ran on it. The handlers of the candidates that lost are dropped here.
+    func result(for channel: Channel) -> EventLoopFuture<HTTPVersion>? {
         lock.lock()
         defer { lock.unlock() }
+        let handler = handlers[ObjectIdentifier(channel)]
+        handlers.removeAll()
         return handler?.protocolNegotiationResult
     }
 }
