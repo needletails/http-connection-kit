@@ -40,7 +40,7 @@ final class ConnectedDatagramEnvelopeAdapter: ChannelDuplexHandler {
     }
 }
 
-@available(anyAppleOS 26, *)
+@available(anyAppleOS 27, *)
 final class HTTP3RequestBox: @unchecked Sendable {
     let request: NIOAsyncChannel<HTTPResponsePart, HTTPRequestPart>
 
@@ -49,7 +49,7 @@ final class HTTP3RequestBox: @unchecked Sendable {
     }
 }
 
-@available(anyAppleOS 26, *)
+@available(anyAppleOS 27, *)
 extension HTTPConnection {
     /// Places QUIC on a datagram channel. TLS is performed by QUIC, not by a separate TLS handler.
     static func installQUICHandler(
@@ -129,7 +129,7 @@ extension HTTPConnection {
             let request: EventLoopFuture<NIOAsyncChannel<HTTPResponsePart, HTTPRequestPart>>
             do {
                 let handler = try connection.pipeline.syncOperations.handler(
-                    type: HTTP3ConnectionHandler<QUICStreamCreator>.self
+                    type: HTTP3ConnectionHandler<QUICStreamCreator, HTTP3ClosureInboundStreamInitializer>.self
                 )
                 request = handler.createRequestStream { parameters in
                     parameters.channel.eventLoop.makeCompletedFuture {
@@ -166,13 +166,13 @@ extension HTTPConnection {
                     remoteAddress: remoteAddress,
                     connectionInitializer: { connectionChannel, streamCreator in
                         connectionChannel.eventLoop.makeCompletedFuture {
-                            let handler = HTTP3ConnectionHandler<QUICStreamCreator>.client(
+                            let handler = HTTP3ConnectionHandler<QUICStreamCreator, HTTP3ClosureInboundStreamInitializer>.client(
                                 eventLoop: connectionChannel.eventLoop,
                                 configuration: .defaults,
                                 settings: .init(maximumFieldSectionSize: 80 * 1024),
                                 streamCreator: streamCreator,
                                 logger: Logger(label: "http-connection-kit.http3"),
-                                inboundPushStreamInitializer: { parameters in
+                                inboundPushStreamInitializer: HTTP3ClosureInboundStreamInitializer { parameters in
                                     parameters.channel.close()
                                 }
                             )
@@ -180,7 +180,7 @@ extension HTTPConnection {
                         }
                     },
                     inboundStreamInitializer: { streamChannel in
-                        streamChannel.parent?.pipeline.handler(type: HTTP3ConnectionHandler<QUICStreamCreator>.self)
+                        streamChannel.parent?.pipeline.handler(type: HTTP3ConnectionHandler<QUICStreamCreator, HTTP3ClosureInboundStreamInitializer>.self)
                             .flatMap { handler in
                                 handler.inboundStreamReceived(streamChannel)
                             } ?? streamChannel.eventLoop.makeFailedFuture(HTTPConnectionError.invalidRequest)

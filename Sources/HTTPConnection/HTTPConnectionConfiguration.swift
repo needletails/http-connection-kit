@@ -455,7 +455,7 @@ extension HTTPConnection.Configuration.TLS.CertificateVerification {
     }
 
     /// QUIC has no separate "skip certificates" mode. `.none` maps to no verification.
-    @available(anyAppleOS 26, *)
+    @available(anyAppleOS 27, *)
     var quic: NIOQUIC.CertificateVerification {
         switch self {
         case .fullVerification:

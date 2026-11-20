@@ -141,7 +141,7 @@ struct AddressFilterTests {
     }
 
     @Test func refusedAddressIsNotTriedOverQUIC() async throws {
-        guard #available(anyAppleOS 26, *) else { return }
+        guard #available(anyAppleOS 27, *) else { return }
         var configuration = uncheckedTLSConfiguration()
         configuration.addressFilter = .publicInternetOnly
         try await withHTTP3Client(configuration: configuration) { client, server in
@@ -153,7 +153,7 @@ struct AddressFilterTests {
     }
 
     @Test func allowedAddressStillUsesQUIC() async throws {
-        guard #available(anyAppleOS 26, *) else { return }
+        guard #available(anyAppleOS 27, *) else { return }
         var configuration = uncheckedTLSConfiguration()
         configuration.addressFilter = Self.loopbackOnly
         try await withHTTP3Client(configuration: configuration) { client, server in

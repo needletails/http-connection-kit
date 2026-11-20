@@ -104,7 +104,7 @@ extension HTTPConnection {
         let opened: (Channel, HTTPVersion)
         var pooledByAttempt = false
         if configuration.protocols.requiredVersion == .http3 {
-            if #available(anyAppleOS 26, *) {
+            if #available(anyAppleOS 27, *) {
                 opened = (
                     try await openQUIC(components, cancelTarget: cancelTarget),
                     .http3
@@ -113,7 +113,7 @@ extension HTTPConnection {
                 throw HTTPConnectionError.unimplemented
             }
         } else if shouldRaceQUIC(components) {
-            if #available(anyAppleOS 26, *) {
+            if #available(anyAppleOS 27, *) {
                 let raced = try await raceQUIC(components, http2Peer: http2Peer, cancelTarget: cancelTarget)
                 opened = (raced.channel, raced.version)
                 pooledByAttempt = raced.pooled
@@ -292,7 +292,7 @@ extension HTTPConnection {
     /// pool adopts the HTTP/3 connection when the handshake completes, so the next request
     /// upgrades. When QUIC completes first the TCP connect is cancelled. A failed handshake denies
     /// the origin until the network path changes.
-    @available(anyAppleOS 26, *)
+    @available(anyAppleOS 27, *)
     private func raceQUIC(
         _ components: RequestComponents,
         http2Peer: HTTP2PeerState,
@@ -373,7 +373,7 @@ extension HTTPConnection {
     ///
     /// The attempt belongs to the client, not to the request that started it. Only `shutdown()`
     /// cancels it, so a request that gives up on waiting leaves the handshake running.
-    @available(anyAppleOS 26, *)
+    @available(anyAppleOS 27, *)
     private func quicAttempt(for components: RequestComponents) -> QUICAttempt {
         let origin = Origin(components)
         if let existing = quicAttempts[origin] {
@@ -433,7 +433,7 @@ extension HTTPConnection {
     }
 
     /// Opens a QUIC connection. The returned channel is the HTTP/3 connection, not the UDP socket.
-    @available(anyAppleOS 26, *)
+    @available(anyAppleOS 27, *)
     private func openQUIC(
         _ components: RequestComponents,
         cancelTarget: CancelTarget

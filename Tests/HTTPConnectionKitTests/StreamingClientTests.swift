@@ -372,7 +372,7 @@ struct StreamingClientTests {
 @Suite("HTTP/3 streaming extras")
 struct HTTP3StreamingTests {
     @Test func bufferedMultipartAndKnownFileRoundTrip() async throws {
-        guard #available(anyAppleOS 26, *) else { return }
+        guard #available(anyAppleOS 27, *) else { return }
         try await withHTTP3Client { client, server in
             var form = try MultipartForm(boundary: "h3-boundary")
             form.append(try .field(name: "message", value: "hello"))

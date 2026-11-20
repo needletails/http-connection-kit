@@ -675,7 +675,7 @@ struct PolicyClientTests {
 @Suite("HTTP/3 decompression")
 struct HTTP3DecompressionTests {
     @Test func gzipIsInflated() async throws {
-        guard #available(anyAppleOS 26, *) else { return }
+        guard #available(anyAppleOS 27, *) else { return }
         try await withHTTP3Client { client, server in
             let gzip = try await client.request(method: .get, url: server.url("/gzip"), headers: [:], body: nil)
             #expect(gzip.body == Data("hello-gzip".utf8))
@@ -685,7 +685,7 @@ struct HTTP3DecompressionTests {
     }
 
     @Test func concurrentGzipStreamsInflate() async throws {
-        guard #available(anyAppleOS 26, *) else { return }
+        guard #available(anyAppleOS 27, *) else { return }
         try await withThrowingTaskGroup(of: Void.self) { group in
             for _ in 0..<6 {
                 group.addTask {

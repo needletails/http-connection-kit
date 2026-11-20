@@ -13,7 +13,7 @@ import Testing
 @Suite("HTTP/3 against a local QUIC server", .serialized)
 struct HTTP3ClientTests {
     @Test func getAndPost() async throws {
-        guard #available(anyAppleOS 26, *) else { return }
+        guard #available(anyAppleOS 27, *) else { return }
         try await withHTTP3Client { client, server in
             let get = try await client.request(
                 method: .get,
@@ -45,7 +45,7 @@ struct HTTP3ClientTests {
     }
 
     @Test func pooledConnectionServesLaterRequests() async throws {
-        guard #available(anyAppleOS 26, *) else { return }
+        guard #available(anyAppleOS 27, *) else { return }
         try await withHTTP3Client { client, server in
             for method in [HTTPRequest.Method.put, .patch, .delete, .options] {
                 let response = try await client.request(
@@ -61,7 +61,7 @@ struct HTTP3ClientTests {
     }
 
     @Test func headEmptyStatusInformationalAndTrailers() async throws {
-        guard #available(anyAppleOS 26, *) else { return }
+        guard #available(anyAppleOS 27, *) else { return }
         try await withHTTP3Client { client, server in
             let head = try await client.request(method: .head, url: server.url("/echo"), headers: [:], body: nil)
             #expect(head.body == nil)
@@ -90,7 +90,7 @@ struct HTTP3ClientTests {
     }
 
     @Test func aFailedRequestDoesNotPreventALaterHTTP3Request() async throws {
-        guard #available(anyAppleOS 26, *) else { return }
+        guard #available(anyAppleOS 27, *) else { return }
         var configuration = uncheckedTLSConfiguration()
         configuration.timeouts.connect = .milliseconds(400)
         configuration.channel.quicIdleTimeout = .seconds(2)
@@ -112,7 +112,7 @@ struct HTTP3ClientTests {
     }
 
     @Test func cancellingAStreamLeavesTheConnectionUsable() async throws {
-        guard #available(anyAppleOS 26, *) else { return }
+        guard #available(anyAppleOS 27, *) else { return }
         let server = try await HTTP3FixtureServer.bind()
         var configuration = uncheckedTLSConfiguration()
         configuration.channel.quicIdleTimeout = .seconds(10)

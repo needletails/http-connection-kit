@@ -98,7 +98,7 @@ func withTLSClient<T>(
     }
 }
 
-@available(anyAppleOS 26, *)
+@available(anyAppleOS 27, *)
 @discardableResult
 func withHTTP3Client<T>(
     configuration: HTTPConnection.Configuration = uncheckedTLSConfiguration(),

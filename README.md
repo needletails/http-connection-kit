@@ -11,7 +11,7 @@ The preferred version is a cap. The client offers every protocol at or below tha
 
 - Swift 6.4
 - macOS or Linux
-- Apple OS 26 or later for HTTP/3
+- Apple OS 27 or later for HTTP/3
 
 On Linux the client opens TCP with SwiftNIO. An HTTP/3 cap there uses the protocol negotiated on TCP.
 

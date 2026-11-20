@@ -543,7 +543,7 @@ extension HTTPConnection {
                 cancelTarget: cancelTarget
             )
         }
-        guard #available(anyAppleOS 26, *) else {
+        guard #available(anyAppleOS 27, *) else {
             throw HTTPConnectionError.unimplemented
         }
         let request = try await Self.openHTTP3Request(
@@ -712,7 +712,7 @@ extension HTTPConnection {
         throw HTTPConnectionError.invalidRequest
     }
 
-    @available(anyAppleOS 26, *)
+    @available(anyAppleOS 27, *)
     private func runHTTP3Exchange(
         request: NIOAsyncChannel<HTTPResponsePart, HTTPRequestPart>,
         context: ExchangeContext,
@@ -931,7 +931,7 @@ func pumpHTTP1(
     }
 }
 
-@available(anyAppleOS 26, *)
+@available(anyAppleOS 27, *)
 func pumpHTTP3(
     box: HTTP3RequestBox,
     context: ExchangeContext,

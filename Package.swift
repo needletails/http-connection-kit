@@ -29,7 +29,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-extras.git", from: "1.35.2"),
         .package(url: "https://github.com/apple/swift-nio-transport-services.git", from: "1.28.0"),
         .package(url: "https://github.com/needletails/swift-nio-quic.git", .upToNextMinor(from: "0.6.1")),
-        .package(url: "https://github.com/apple/swift-nio-http3.git", .upToNextMinor(from: "0.3.0")),
+        .package(url: "https://github.com/apple/swift-nio-http3.git", .upToNextMinor(from: "0.5.0")),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "5.0.3"),
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.21.1"),
         .package(url: "https://github.com/mihai8804858/swift-gzip.git", from: "1.2.3")

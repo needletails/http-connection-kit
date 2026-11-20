@@ -16,7 +16,7 @@ import NIOPosix
 import NIOQUIC
 
 /// HTTP/3 server on a UDP socket. TCP is not listening, so a client that prefers HTTP/3 can only succeed on QUIC.
-@available(anyAppleOS 26, *)
+@available(anyAppleOS 27, *)
 final class HTTP3FixtureServer {
     let port: Int
     let accepts: AcceptCounter
@@ -72,13 +72,13 @@ final class HTTP3FixtureServer {
                         inboundConnectionInitializer: { connection, streamCreator in
                             accepts.increment()
                             return connection.eventLoop.makeCompletedFuture {
-                                let http3 = HTTP3ConnectionHandler<QUICStreamCreator>.server(
+                                let http3 = HTTP3ConnectionHandler<QUICStreamCreator, HTTP3ClosureInboundStreamInitializer>.server(
                                     eventLoop: connection.eventLoop,
                                     configuration: .defaults,
                                     settings: .init(maximumFieldSectionSize: 80 * 1024),
                                     streamCreator: streamCreator,
                                     logger: logger,
-                                    inboundRequestStreamInitializer: { parameters in
+                                    inboundRequestStreamInitializer: HTTP3ClosureInboundStreamInitializer { parameters in
                                         parameters.channel.eventLoop.makeCompletedFuture {
                                             let stream = try NIOAsyncChannel<HTTPRequestPart, HTTPResponsePart>(
                                                 wrappingChannelSynchronously: parameters.channel,
@@ -98,7 +98,7 @@ final class HTTP3FixtureServer {
                                 return stream.eventLoop.makeFailedFuture(FixtureServerError.missingParent)
                             }
                             return parent.pipeline.handler(
-                                type: HTTP3ConnectionHandler<QUICStreamCreator>.self
+                                type: HTTP3ConnectionHandler<QUICStreamCreator, HTTP3ClosureInboundStreamInitializer>.self
                             ).flatMap { handler in
                                 handler.inboundStreamReceived(stream)
                             }
@@ -132,7 +132,7 @@ final class HTTP3FixtureServer {
     }
 }
 
-@available(anyAppleOS 26, *)
+@available(anyAppleOS 27, *)
 enum HTTP3FixtureResponder {
     static func respond(
         on stream: NIOAsyncChannel<HTTPRequestPart, HTTPResponsePart>,
